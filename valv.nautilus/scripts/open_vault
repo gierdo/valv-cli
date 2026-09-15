@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+GUI_BIN=$(command -v valv-gui 2>/dev/null || echo "$SCRIPT_DIR/../valv-gui")
+exec "$GUI_BIN" mount "$@"

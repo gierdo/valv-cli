@@ -1,0 +1,15 @@
+[package]
+name = "valv"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chacha20 = "0.10.2"
+pbkdf2 = "0.13.0"
+rand = "0.10.2"
+rpassword = "7.5.4"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+sha2 = "0.11.0"
+libc = "0.2"
+clap = { version = "4.6.7", features = ["derive"] }
