@@ -12,14 +12,12 @@ Yazi plugin to transparently mount, encrypt, and decrypt [Valv](https://github.c
 
 ## Prerequisites
 
-- `valv` CLI installed in `$PATH` (e.g. `cargo install --path valv-cli`).
+- `valv` CLI installed in `$PATH` (e.g. `cargo install --git https://github.com/gierdo/vault-cli.git`).
 
 ## Installation
 
-Symlink this directory into your Yazi plugins folder:
-
 ```sh
-ln -sfn "$(pwd)/valv.yazi" ~/.config/yazi/plugins/valv.yazi
+ya pkg add gierdo/valv-cli:valv
 ```
 
 Add this to `~/.config/yazi/keymap.toml`:

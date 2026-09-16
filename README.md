@@ -42,12 +42,18 @@ cargo install --path valv-cli
 This compiles and installs the binary to `~/.cargo/bin/valv`. Ensure
 `~/.cargo/bin` is in your `$PATH`.
 
-### 2. Install the Yazi plugin
-
-Symlink or copy the plugin into your user Yazi config:
+Or, without cloning the repo explicitly:
 
 ```sh
-ln -sfn "$(pwd)/valv-cli/valv.yazi" ~/.config/yazi/plugins/valv.yazi
+cargo install --git https://github.com/gierdo/vault-cli.git
+```
+
+### 2. Install the Yazi plugin
+
+Install the  plugin into your user Yazi config:
+
+```sh
+ya pkg add gierdo/valv-cli:valv
 ```
 
 ### 3. Add Keymap to Yazi
