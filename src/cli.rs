@@ -171,9 +171,9 @@ impl CliArgs {
                 self.files.clone()
             };
 
-            let mode = if self.files.len() == 1 && self.files[0].is_dir() {
+            let mode = if files.len() == 1 && files[0].is_dir() {
                 Mode::Mount
-            } else if self.files.iter().any(|f| is_valv_fn(f)) {
+            } else if files.iter().any(|f| is_valv_fn(f)) {
                 Mode::Decrypt
             } else {
                 Mode::Encrypt
@@ -250,5 +250,14 @@ mod tests {
         let cli_ls = CliArgs::try_parse_from(args_ls).unwrap();
         let (mode_ls, _) = cli_ls.resolve_mode_and_files(|_| false);
         assert_eq!(mode_ls, Mode::Mounts);
+    }
+
+    #[test]
+    fn test_parse_args_no_args_mounts_current_dir() {
+        let args = vec!["valv"];
+        let cli = CliArgs::try_parse_from(args).unwrap();
+        let (mode, files) = cli.resolve_mode_and_files(|_| false);
+        assert_eq!(mode, Mode::Mount);
+        assert_eq!(files, vec![PathBuf::from(".")]);
     }
 }

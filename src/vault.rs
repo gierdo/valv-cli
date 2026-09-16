@@ -3,6 +3,7 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -10,6 +11,7 @@ use rand::RngExt;
 use serde::{Deserialize, Serialize};
 
 use crate::crypto::{BUFFER_SIZE, DecryptError, decrypt_header, encrypt_stream};
+use crate::ValvError;
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default)]
 pub struct ValvSession {
@@ -192,36 +194,57 @@ pub fn generate_random_filename(suffix: &str) -> String {
     format!("{}{}", prefix, suffix)
 }
 
+#[cfg(unix)]
+pub fn get_current_uid() -> u32 {
+    unsafe { libc::getuid() }
+}
+
+#[cfg(not(unix))]
+pub fn get_current_uid() -> u32 {
+    0
+}
+
+pub fn user_mount_base() -> PathBuf {
+    let uid = get_current_uid();
+    let shm = Path::new("/dev/shm");
+    let base = if shm.exists() {
+        shm.to_path_buf()
+    } else {
+        std::env::temp_dir()
+    };
+    base.join(format!("valv-{}", uid))
+}
+
+pub fn is_process_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe {
+            libc::kill(pid as i32, 0) == 0
+                || io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        false
+    }
+}
+
 pub fn get_mount_dir(vault_dir: &Path, watch_pid: u32, custom_output: Option<&Path>) -> PathBuf {
     if let Some(out) = custom_output {
         return out.to_path_buf();
     }
-    let uid = unsafe { libc::getuid() };
-    let shm = Path::new("/dev/shm");
-    let base = if shm.exists() {
-        shm.to_path_buf()
-    } else {
-        std::env::temp_dir()
-    };
     let vault_name = vault_dir
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("vault");
-    base.join(format!("valv-{}/{}-{}", uid, vault_name, watch_pid))
+    user_mount_base().join(format!("{}-{}", vault_name, watch_pid))
 }
 
 pub fn list_mounts() -> Vec<ActiveMount> {
-    let uid = unsafe { libc::getuid() };
-    let shm = Path::new("/dev/shm");
-    let base = if shm.exists() {
-        shm.to_path_buf()
-    } else {
-        std::env::temp_dir()
-    };
-    let user_mount_base = base.join(format!("valv-{}", uid));
+    let base = user_mount_base();
     let mut mounts = Vec::new();
 
-    if let Ok(entries) = fs::read_dir(user_mount_base) {
+    if let Ok(entries) = fs::read_dir(base) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.is_dir() {
@@ -243,6 +266,62 @@ pub fn list_mounts() -> Vec<ActiveMount> {
     mounts
 }
 
+static TERMINATE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(unix)]
+extern "C" fn sig_handler(_: libc::c_int) {
+    TERMINATE.store(true, Ordering::SeqCst);
+}
+
+fn sync_file_to_vault(
+    src_path: &Path,
+    vault_dir: &Path,
+    valv_name: &str,
+    filename: &str,
+    password_bytes: &[u8],
+    iterations: u32,
+) -> io::Result<()> {
+    let target_valv = vault_dir.join(valv_name);
+    let temp_valv = vault_dir.join(format!(".{}.tmp", valv_name));
+
+    let res = (|| -> io::Result<()> {
+        let mut in_file = BufReader::with_capacity(BUFFER_SIZE, File::open(src_path)?);
+        let out_file = File::create(&temp_valv)?;
+        let mut writer = BufWriter::with_capacity(BUFFER_SIZE, out_file);
+        encrypt_stream(
+            &mut in_file,
+            &mut writer,
+            password_bytes,
+            filename,
+            iterations,
+        )?;
+        fs::rename(&temp_valv, &target_valv)?;
+        Ok(())
+    })();
+
+    if res.is_err() {
+        let _ = fs::remove_file(&temp_valv);
+        return res;
+    }
+
+    if let Some(thumb_name) = get_thumbnail_valv_name(valv_name) {
+        let thumb_valv = vault_dir.join(&thumb_name);
+        if let Ok(true) = create_thumbnail_file(
+            src_path,
+            &thumb_valv,
+            password_bytes,
+            filename,
+            iterations,
+        ) {
+            // Thumbnail updated
+        } else {
+            let _ = fs::remove_file(&thumb_valv);
+        }
+    }
+
+    Ok(())
+}
+
 pub fn mount_vault(
     vault_dir: &Path,
     mount_dir: &Path,
@@ -250,9 +329,9 @@ pub fn mount_vault(
     watch_pid: u32,
     foreground: bool,
     iterations: u32,
-) -> Result<(), (String, u8)> {
+) -> Result<(), ValvError> {
     let entries = fs::read_dir(vault_dir).map_err(|e| {
-        (
+        ValvError::Message(
             format!("Cannot read vault directory {}: {}", vault_dir.display(), e),
             1,
         )
@@ -269,7 +348,7 @@ pub fn mount_vault(
 
     // Verify password on first file if any exist
     if let Some(first_file) = valv_files.first() {
-        let f = File::open(first_file).map_err(|e| (e.to_string(), 1))?;
+        let f = File::open(first_file)?;
         let mut r = BufReader::new(f);
         let is_v1 = first_file
             .file_name()
@@ -277,12 +356,12 @@ pub fn mount_vault(
             .map(|n| n.starts_with(".valv."))
             .unwrap_or(false);
         if let Err(DecryptError::InvalidPassword) = decrypt_header(&mut r, password_bytes, is_v1) {
-            return Err(("Incorrect password for vault".to_string(), 2));
+            return Err(ValvError::InvalidPassword);
         }
     }
 
     fs::create_dir_all(mount_dir).map_err(|e| {
-        (
+        ValvError::Message(
             format!(
                 "Failed to create mount directory {}: {}",
                 mount_dir.display(),
@@ -331,7 +410,7 @@ pub fn mount_vault(
             Ok(h) => h,
             Err(DecryptError::InvalidPassword) => {
                 let _ = fs::remove_dir_all(mount_dir);
-                return Err(("Incorrect password for vault".to_string(), 2));
+                return Err(ValvError::InvalidPassword);
             }
             Err(e) => {
                 eprintln!("Warning: skipping {}: {}", valv_path.display(), e);
@@ -398,9 +477,8 @@ pub fn mount_vault(
     }
 
     let session_json = serde_json::to_string(&session)
-        .map_err(|e| (format!("Session serialization failed: {}", e), 1))?;
-    fs::write(mount_dir.join(".valv_session.json"), session_json)
-        .map_err(|e| (format!("Failed to write session file: {}", e), 1))?;
+        .map_err(|e| ValvError::Message(format!("Session serialization failed: {}", e), 1))?;
+    fs::write(mount_dir.join(".valv_session.json"), session_json)?;
 
     if foreground {
         println!("READY {}", mount_dir.display());
@@ -412,8 +490,7 @@ pub fn mount_vault(
             iterations,
         )?;
     } else {
-        let current_exe = std::env::current_exe()
-            .map_err(|e| (format!("Failed to determine binary path: {}", e), 1))?;
+        let current_exe = std::env::current_exe()?;
 
         let mut child = std::process::Command::new(current_exe)
             .arg("sync-daemon")
@@ -427,7 +504,7 @@ pub fn mount_vault(
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
-            .map_err(|e| (format!("Failed to spawn background daemon: {}", e), 1))?;
+            .map_err(|e| ValvError::Message(format!("Failed to spawn background daemon: {}", e), 1))?;
 
         if let Some(mut stdin) = child.stdin.take() {
             let _ = stdin.write_all(password_bytes);
@@ -446,7 +523,7 @@ pub fn run_sync_daemon(
     password_bytes: &[u8],
     watch_pid: u32,
     iterations: u32,
-) -> Result<(), (String, u8)> {
+) -> Result<(), ValvError> {
     let session_file = mount_dir.join(".valv_session.json");
     let mut session: ValvSession = if session_file.exists() {
         let data = fs::read_to_string(&session_file).unwrap_or_default();
@@ -457,11 +534,22 @@ pub fn run_sync_daemon(
     session.vault_dir = vault_dir.to_path_buf();
     session.daemon_pid = std::process::id();
 
+    #[cfg(unix)]
+    unsafe {
+        libc::signal(libc::SIGINT, sig_handler as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, sig_handler as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGHUP, sig_handler as *const () as libc::sighandler_t);
+    }
+
     let close_trigger = mount_dir.join(".valv_close");
 
     loop {
+        if TERMINATE.load(Ordering::SeqCst) {
+            break;
+        }
+
         // 1. Check if watched process (e.g. Yazi) is still running
-        if !Path::new(&format!("/proc/{}", watch_pid)).exists() {
+        if !is_process_alive(watch_pid) {
             break;
         }
 
@@ -492,80 +580,41 @@ pub fn run_sync_daemon(
                 let size = meta.len();
 
                 if let Some(item) = session.files.get_mut(filename) {
-                    if item.mtime_secs != mtime || item.size != size {
-                        // File modified: re-encrypt to same valv_name
-                        let target_valv = vault_dir.join(&item.valv_name);
-                        if let Ok(mut in_file) = File::open(&path)
-                            && let Ok(out_file) = File::create(&target_valv)
-                        {
-                            let mut writer = BufWriter::new(out_file);
-                            if encrypt_stream(
-                                &mut in_file,
-                                &mut writer,
-                                password_bytes,
-                                filename,
-                                iterations,
-                            )
-                            .is_ok()
-                            {
-                                item.mtime_secs = mtime;
-                                item.size = size;
-
-                                if let Some(thumb_name) = get_thumbnail_valv_name(&item.valv_name) {
-                                    let thumb_valv = vault_dir.join(&thumb_name);
-                                    if let Ok(true) = create_thumbnail_file(
-                                        &path,
-                                        &thumb_valv,
-                                        password_bytes,
-                                        filename,
-                                        iterations,
-                                    ) {
-                                        // Thumbnail updated
-                                    } else {
-                                        let _ = fs::remove_file(thumb_valv);
-                                    }
-                                }
-                            }
-                        }
-                    }
-                } else {
-                    // New file added: encrypt to new valv file
-                    let suffix = get_suffix_for_path(&path);
-                    let new_valv_name = generate_random_filename(suffix);
-                    let target_valv = vault_dir.join(&new_valv_name);
-                    if let Ok(mut in_file) = File::open(&path)
-                        && let Ok(out_file) = File::create(&target_valv)
-                    {
-                        let mut writer = BufWriter::new(out_file);
-                        if encrypt_stream(
-                            &mut in_file,
-                            &mut writer,
-                            password_bytes,
+                    if (item.mtime_secs != mtime || item.size != size)
+                        && sync_file_to_vault(
+                            &path,
+                            vault_dir,
+                            &item.valv_name,
                             filename,
+                            password_bytes,
                             iterations,
                         )
                         .is_ok()
-                        {
-                            if let Some(thumb_name) = get_thumbnail_valv_name(&new_valv_name) {
-                                let thumb_valv = vault_dir.join(&thumb_name);
-                                let _ = create_thumbnail_file(
-                                    &path,
-                                    &thumb_valv,
-                                    password_bytes,
-                                    filename,
-                                    iterations,
-                                );
-                            }
-
-                            session.files.insert(
-                                filename.to_string(),
-                                SessionFileEntry {
-                                    valv_name: new_valv_name,
-                                    mtime_secs: mtime,
-                                    size,
-                                },
-                            );
-                        }
+                    {
+                        item.mtime_secs = mtime;
+                        item.size = size;
+                    }
+                } else {
+                    let suffix = get_suffix_for_path(&path);
+                    let new_valv_name = generate_random_filename(suffix);
+                    if sync_file_to_vault(
+                        &path,
+                        vault_dir,
+                        &new_valv_name,
+                        filename,
+                        password_bytes,
+                        iterations,
+                    )
+                    .is_ok()
+                    {
+                        session.files.insert(
+                            filename.to_string(),
+                            SessionFileEntry {
+                                valv_name: new_valv_name,
+                                mtime_secs: mtime,
+                                size,
+                            },
+                        );
                     }
                 }
             }
@@ -604,42 +653,46 @@ pub fn run_sync_daemon(
     Ok(())
 }
 
-pub fn unmount_vault(target_path: &Path) -> Result<(), (String, u8)> {
-    let mount_dir = if target_path.join(".valv_session.json").exists() {
-        target_path.to_path_buf()
+pub fn unmount_vault(target_path: &Path) -> Result<(), ValvError> {
+    let (mount_dir, daemon_pid) = if target_path.join(".valv_session.json").exists() {
+        let session_file = target_path.join(".valv_session.json");
+        let daemon_pid = fs::read_to_string(&session_file)
+            .ok()
+            .and_then(|d| serde_json::from_str::<ValvSession>(&d).ok())
+            .map(|s| s.daemon_pid);
+        (target_path.to_path_buf(), daemon_pid)
     } else {
-        let uid = unsafe { libc::getuid() };
-        let shm = Path::new("/dev/shm");
-        let base = if shm.exists() {
-            shm.to_path_buf()
+        let target_canon = fs::canonicalize(target_path).unwrap_or_else(|_| target_path.to_path_buf());
+        let mounts = list_mounts();
+        let matched = mounts.into_iter().find(|m| {
+            let v_canon = fs::canonicalize(&m.vault_dir).unwrap_or_else(|_| m.vault_dir.clone());
+            let m_canon = fs::canonicalize(&m.mount_dir).unwrap_or_else(|_| m.mount_dir.clone());
+            v_canon == target_canon || m_canon == target_canon
+        });
+
+        if let Some(m) = matched {
+            (m.mount_dir, Some(m.daemon_pid))
         } else {
-            std::env::temp_dir()
-        };
-        let mut found = None;
-        if let Ok(entries) = fs::read_dir(base.join(format!("valv-{}", uid))) {
-            for e in entries.flatten() {
-                if e.path().is_dir() {
-                    found = Some(e.path());
-                    break;
-                }
-            }
-        }
-        found.ok_or_else(|| {
-            (
-                format!("No active Valv mount found at {}", target_path.display()),
+            return Err(ValvError::Message(
+                format!("No active Valv mount found for {}", target_path.display()),
                 1,
-            )
-        })?
+            ));
+        }
     };
 
     let close_file = mount_dir.join(".valv_close");
     let _ = fs::write(&close_file, b"close");
 
-    // Wait for daemon to clean up (up to 1.5 seconds)
-    for _ in 0..15 {
+    // Wait for daemon to clean up and exit cleanly
+    for _ in 0..50 {
         if !mount_dir.exists() {
             println!("Unmounted: {}", mount_dir.display());
             return Ok(());
+        }
+        if let Some(pid) = daemon_pid
+            && !is_process_alive(pid)
+        {
+            break;
         }
         thread::sleep(Duration::from_millis(100));
     }
@@ -713,6 +766,39 @@ mod tests {
 
         // Unmount
         unmount_vault(&mount_dir).expect("Unmount should succeed");
+        assert!(!mount_dir.exists());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_unmount_by_vault_dir() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("valv_test_vdir_{}", rand::rng().random::<u32>()));
+        let vault_dir = temp_dir.join("vault");
+        fs::create_dir_all(&vault_dir).unwrap();
+
+        let password = b"VaultPass123";
+        let file_path = vault_dir.join("testfile-x.valv");
+        let mut out = BufWriter::new(File::create(&file_path).unwrap());
+        encrypt_stream(
+            &mut Cursor::new(b"Hello from vault"),
+            &mut out,
+            password,
+            "hello.txt",
+            1000,
+        )
+        .unwrap();
+
+        let current_pid = std::process::id();
+        let mount_dir = get_mount_dir(&vault_dir, current_pid, None);
+        mount_vault(&vault_dir, &mount_dir, password, current_pid, false, 1000)
+            .expect("Mount should succeed");
+
+        assert!(mount_dir.join("hello.txt").exists());
+
+        // Unmount using vault directory path instead of mount directory path
+        unmount_vault(&vault_dir).expect("Unmount by vault dir should succeed");
         assert!(!mount_dir.exists());
 
         let _ = fs::remove_dir_all(&temp_dir);

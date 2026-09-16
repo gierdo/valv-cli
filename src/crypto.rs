@@ -61,23 +61,31 @@ pub struct DecryptedHeader {
     pub cipher: ChaCha20,
 }
 
+pub fn transform_stream<R: Read, W: Write>(
+    cipher: &mut ChaCha20,
+    reader: &mut R,
+    writer: &mut W,
+) -> io::Result<()> {
+    let mut buffer = vec![0u8; BUFFER_SIZE];
+    loop {
+        let n = reader.read(&mut buffer)?;
+        if n == 0 {
+            break;
+        }
+        cipher.apply_keystream(&mut buffer[..n]);
+        writer.write_all(&buffer[..n])?;
+    }
+    writer.flush()?;
+    Ok(())
+}
+
 impl DecryptedHeader {
     pub fn decrypt_payload<R: Read, W: Write>(
         &mut self,
         reader: &mut R,
         writer: &mut W,
     ) -> io::Result<()> {
-        let mut buffer = vec![0u8; BUFFER_SIZE];
-        loop {
-            let n = reader.read(&mut buffer)?;
-            if n == 0 {
-                break;
-            }
-            self.cipher.apply_keystream(&mut buffer[..n]);
-            writer.write_all(&buffer[..n])?;
-        }
-        writer.flush()?;
-        Ok(())
+        transform_stream(&mut self.cipher, reader, writer)
     }
 }
 
@@ -128,18 +136,7 @@ pub fn encrypt_stream<R: Read, W: Write>(
     cipher.apply_keystream(&mut prefix_bytes);
     writer.write_all(&prefix_bytes)?;
 
-    let mut buffer = vec![0u8; BUFFER_SIZE];
-    loop {
-        let n = reader.read(&mut buffer)?;
-        if n == 0 {
-            break;
-        }
-        cipher.apply_keystream(&mut buffer[..n]);
-        writer.write_all(&buffer[..n])?;
-    }
-
-    writer.flush()?;
-    Ok(())
+    transform_stream(&mut cipher, reader, writer)
 }
 
 pub fn decrypt_header<R: Read>(
@@ -170,7 +167,11 @@ pub fn decrypt_header<R: Read>(
         reader.read_exact(&mut dec_check)?;
         cipher.apply_keystream(&mut dec_check);
 
-        if dec_check != check_bytes {
+        let mut diff = 0u8;
+        for (a, b) in dec_check.iter().zip(check_bytes.iter()) {
+            diff |= a ^ b;
+        }
+        if diff != 0 {
             return Err(DecryptError::InvalidPassword);
         }
 
@@ -264,6 +265,29 @@ pub fn decrypt_file_to<W: Write>(
     let mut header = decrypt_header(&mut reader, password, is_v1_hint)?;
     header.decrypt_payload(&mut reader, writer)?;
     Ok(header.original_name)
+}
+
+pub fn encrypt_file(
+    source: &Path,
+    dest: &Path,
+    password: &[u8],
+    original_name: &str,
+    iterations: u32,
+) -> io::Result<()> {
+    let mut in_file = BufReader::with_capacity(BUFFER_SIZE, File::open(source)?);
+    let out_file = File::create(dest)?;
+    let mut out_writer = std::io::BufWriter::with_capacity(BUFFER_SIZE, out_file);
+    encrypt_stream(&mut in_file, &mut out_writer, password, original_name, iterations)
+}
+
+pub fn decrypt_file(
+    source: &Path,
+    dest: &Path,
+    password: &[u8],
+) -> Result<String, DecryptError> {
+    let out_file = File::create(dest)?;
+    let mut out_writer = std::io::BufWriter::with_capacity(BUFFER_SIZE, out_file);
+    decrypt_file_to(source, password, &mut out_writer)
 }
 
 #[cfg(test)]

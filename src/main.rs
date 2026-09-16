@@ -1,28 +1,25 @@
-mod cli;
-mod crypto;
-mod vault;
-
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use cli::{CliArgs, Mode, print_help, read_password};
-use crypto::{
+use valv::cli::{CliArgs, Mode, print_help, read_password};
+use valv::crypto::{
     BUFFER_SIZE, DEFAULT_ITERATIONS, DecryptError, decrypt_file_to, decrypt_header, encrypt_stream,
 };
-use vault::{
+use valv::vault::{
     create_thumbnail_file, generate_random_filename, get_mount_dir, get_suffix_for_path,
     get_thumbnail_valv_name, is_thumbnail_valv_file, is_valv_file, list_mounts, mount_vault,
     run_sync_daemon, unmount_vault,
 };
+use valv::ValvError;
 
 fn resolve_output_path(
     output: Option<&Path>,
     default_dir: &Path,
     filename: &str,
     multiple_inputs: bool,
-) -> Result<PathBuf, (String, u8)> {
+) -> Result<PathBuf, ValvError> {
     if let Some(out) = output {
         let is_dir_target = out.is_dir()
             || out.to_string_lossy().ends_with('/')
@@ -31,7 +28,7 @@ fn resolve_output_path(
 
         if is_dir_target {
             fs::create_dir_all(out).map_err(|e| {
-                (
+                ValvError::Message(
                     format!("Failed to create directory {}: {}", out.display(), e),
                     1,
                 )
@@ -50,16 +47,16 @@ fn resolve_output_path(
     }
 }
 
-fn run_encrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), (String, u8)> {
+fn run_encrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), ValvError> {
     if files.is_empty() {
         print_help();
-        return Err(("No input files specified.".to_string(), 1));
+        return Err(ValvError::Message("No input files specified.".to_string(), 1));
     }
 
-    let password =
-        read_password(cli).map_err(|e| (format!("Failed to read password: {}", e), 1))?;
+    let password = read_password(cli)
+        .map_err(|e| ValvError::Message(format!("Failed to read password: {}", e), 1))?;
     if password.is_empty() {
-        return Err(("Password cannot be empty.".to_string(), 1));
+        return Err(ValvError::Message("Password cannot be empty.".to_string(), 1));
     }
     let password_bytes = password.as_bytes();
     let iterations = cli.iterations.unwrap_or(DEFAULT_ITERATIONS);
@@ -94,11 +91,8 @@ fn run_encrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), (String, u8)> {
         }
 
         // simplification: write directly with cleanup on failure
-        let mut in_file = BufReader::with_capacity(
-            BUFFER_SIZE,
-            File::open(file_path).map_err(|e| (e.to_string(), 1))?,
-        );
-        let out_file = File::create(&dest_path).map_err(|e| (e.to_string(), 1))?;
+        let mut in_file = BufReader::with_capacity(BUFFER_SIZE, File::open(file_path)?);
+        let out_file = File::create(&dest_path)?;
         let mut out_writer = BufWriter::with_capacity(BUFFER_SIZE, out_file);
 
         if let Err(e) = encrypt_stream(
@@ -109,7 +103,7 @@ fn run_encrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), (String, u8)> {
             iterations,
         ) {
             let _ = fs::remove_file(&dest_path);
-            return Err((
+            return Err(ValvError::Message(
                 format!("Encryption failed for {}: {}", file_path.display(), e),
                 1,
             ));
@@ -122,12 +116,17 @@ fn run_encrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), (String, u8)> {
         );
 
         if let Some(thumb_name) = get_thumbnail_valv_name(&dest_filename) {
-            let thumb_path = resolve_output_path(
-                cli.output.as_deref(),
-                default_dir,
-                &thumb_name,
-                files.len() > 1,
-            )?;
+            let thumb_path = if let Some(out) = cli.output.as_deref() {
+                if out.is_dir() || files.len() > 1 {
+                    out.join(&thumb_name)
+                } else {
+                    let parent = out.parent().unwrap_or_else(|| Path::new("."));
+                    parent.join(&thumb_name)
+                }
+            } else {
+                default_dir.join(&thumb_name)
+            };
+
             if (!thumb_path.exists() || cli.force)
                 && let Ok(true) = create_thumbnail_file(
                     file_path,
@@ -149,16 +148,16 @@ fn run_encrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), (String, u8)> {
     Ok(())
 }
 
-fn run_decrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), (String, u8)> {
+fn run_decrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), ValvError> {
     if files.is_empty() {
         print_help();
-        return Err(("No input files specified.".to_string(), 1));
+        return Err(ValvError::Message("No input files specified.".to_string(), 1));
     }
 
-    let password =
-        read_password(cli).map_err(|e| (format!("Failed to read password: {}", e), 1))?;
+    let password = read_password(cli)
+        .map_err(|e| ValvError::Message(format!("Failed to read password: {}", e), 1))?;
     if password.is_empty() {
-        return Err(("Password cannot be empty.".to_string(), 1));
+        return Err(ValvError::Message("Password cannot be empty.".to_string(), 1));
     }
     let password_bytes = password.as_bytes();
 
@@ -187,17 +186,16 @@ fn run_decrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), (String, u8)> {
         if cli.to_stdout {
             let mut stdout = io::stdout().lock();
             if let Err(e) = decrypt_file_to(file_path, password_bytes, &mut stdout) {
-                let exit_code = match e {
-                    DecryptError::InvalidPassword => 2,
-                    _ => 1,
-                };
-                return Err((
-                    format!("Decryption failed for {}: {}", file_path.display(), e),
-                    exit_code,
-                ));
+                return Err(match e {
+                    DecryptError::InvalidPassword => ValvError::InvalidPassword,
+                    other => ValvError::Message(
+                        format!("Decryption failed for {}: {}", file_path.display(), other),
+                        1,
+                    ),
+                });
             }
         } else {
-            let file = File::open(file_path).map_err(|e| (e.to_string(), 1))?;
+            let file = File::open(file_path)?;
             let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
             let is_v1_hint = file_path
                 .file_name()
@@ -207,11 +205,12 @@ fn run_decrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), (String, u8)> {
 
             let mut header = match decrypt_header(&mut reader, password_bytes, is_v1_hint) {
                 Ok(h) => h,
-                Err(DecryptError::InvalidPassword) => {
-                    return Err((format!("Incorrect password for {}", file_path.display()), 2));
-                }
+                Err(DecryptError::InvalidPassword) => return Err(ValvError::InvalidPassword),
                 Err(e) => {
-                    return Err((format!("Failed to read {}: {}", file_path.display(), e), 1));
+                    return Err(ValvError::Message(
+                        format!("Failed to read {}: {}", file_path.display(), e),
+                        1,
+                    ));
                 }
             };
 
@@ -237,12 +236,15 @@ fn run_decrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), (String, u8)> {
                 continue;
             }
 
-            let out_file = File::create(&dest_path).map_err(|e| (e.to_string(), 1))?;
+            let out_file = File::create(&dest_path)?;
             let mut out_writer = BufWriter::with_capacity(BUFFER_SIZE, out_file);
 
             if let Err(e) = header.decrypt_payload(&mut reader, &mut out_writer) {
                 let _ = fs::remove_file(&dest_path);
-                return Err((format!("Write error for {}: {}", dest_path.display(), e), 1));
+                return Err(ValvError::Message(
+                    format!("Write error for {}: {}", dest_path.display(), e),
+                    1,
+                ));
             }
 
             println!(
@@ -256,7 +258,7 @@ fn run_decrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), (String, u8)> {
     Ok(())
 }
 
-fn run() -> Result<(), (String, u8)> {
+fn run() -> Result<(), ValvError> {
     let cli = CliArgs::parse();
     let (mode, files) = cli.resolve_mode_and_files(is_valv_file);
 
@@ -264,13 +266,16 @@ fn run() -> Result<(), (String, u8)> {
         Mode::Mount => {
             let vault_dir = files.first().cloned().unwrap_or_else(|| PathBuf::from("."));
             if !vault_dir.is_dir() {
-                return Err((format!("Not a directory: {}", vault_dir.display()), 1));
+                return Err(ValvError::Message(
+                    format!("Not a directory: {}", vault_dir.display()),
+                    1,
+                ));
             }
 
-            let password =
-                read_password(&cli).map_err(|e| (format!("Failed to read password: {}", e), 1))?;
+            let password = read_password(&cli)
+                .map_err(|e| ValvError::Message(format!("Failed to read password: {}", e), 1))?;
             if password.is_empty() {
-                return Err(("Password cannot be empty.".to_string(), 1));
+                return Err(ValvError::Message("Password cannot be empty.".to_string(), 1));
             }
 
             let watch_pid = cli
@@ -314,7 +319,7 @@ fn run() -> Result<(), (String, u8)> {
         }
         Mode::SyncDaemon => {
             if files.len() < 2 {
-                return Err((
+                return Err(ValvError::Message(
                     "sync-daemon requires <vault_dir> <mount_dir>".to_string(),
                     1,
                 ));
@@ -323,12 +328,10 @@ fn run() -> Result<(), (String, u8)> {
             let mount_dir = &files[1];
             let watch_pid = cli
                 .watch_pid
-                .ok_or_else(|| ("Missing --watch-pid".to_string(), 1))?;
+                .ok_or_else(|| ValvError::Message("Missing --watch-pid".to_string(), 1))?;
 
             let mut password = String::new();
-            io::stdin()
-                .read_line(&mut password)
-                .map_err(|e| (e.to_string(), 1))?;
+            io::stdin().read_line(&mut password)?;
             let password = password.trim_end_matches(&['\r', '\n'][..]);
             let iterations = cli.iterations.unwrap_or(DEFAULT_ITERATIONS);
 
@@ -350,9 +353,9 @@ fn run() -> Result<(), (String, u8)> {
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
-        Err((msg, code)) => {
-            eprintln!("Error: {}", msg);
-            ExitCode::from(code)
+        Err(e) => {
+            eprintln!("Error: {}", e);
+            ExitCode::from(e.exit_code())
         }
     }
 }
