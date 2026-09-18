@@ -238,8 +238,8 @@ pub fn decrypt_header<R: Read>(
             return Err(DecryptError::InvalidPassword);
         }
 
-        let original_name = String::from_utf8(name_bytes)
-            .map_err(|_| DecryptError::InvalidPassword)?;
+        let original_name =
+            String::from_utf8(name_bytes).map_err(|_| DecryptError::InvalidPassword)?;
 
         Ok(DecryptedHeader {
             original_name,
@@ -277,14 +277,16 @@ pub fn encrypt_file(
     let mut in_file = BufReader::with_capacity(BUFFER_SIZE, File::open(source)?);
     let out_file = File::create(dest)?;
     let mut out_writer = std::io::BufWriter::with_capacity(BUFFER_SIZE, out_file);
-    encrypt_stream(&mut in_file, &mut out_writer, password, original_name, iterations)
+    encrypt_stream(
+        &mut in_file,
+        &mut out_writer,
+        password,
+        original_name,
+        iterations,
+    )
 }
 
-pub fn decrypt_file(
-    source: &Path,
-    dest: &Path,
-    password: &[u8],
-) -> Result<String, DecryptError> {
+pub fn decrypt_file(source: &Path, dest: &Path, password: &[u8]) -> Result<String, DecryptError> {
     let out_file = File::create(dest)?;
     let mut out_writer = std::io::BufWriter::with_capacity(BUFFER_SIZE, out_file);
     decrypt_file_to(source, password, &mut out_writer)
@@ -311,8 +313,8 @@ mod tests {
         assert_eq!(&encrypted[..4], &VALV_V2.to_be_bytes());
 
         let mut enc_cursor = Cursor::new(&encrypted);
-        let mut header = decrypt_header(&mut enc_cursor, password, false)
-            .expect("Decryption header failed");
+        let mut header =
+            decrypt_header(&mut enc_cursor, password, false).expect("Decryption header failed");
         assert_eq!(header.original_name, original_name);
 
         let mut decrypted_payload = Vec::new();

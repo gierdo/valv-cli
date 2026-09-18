@@ -3,6 +3,7 @@ use std::io::{self, BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use valv::ValvError;
 use valv::cli::{CliArgs, Mode, print_help, read_password};
 use valv::crypto::{
     BUFFER_SIZE, DEFAULT_ITERATIONS, DecryptError, decrypt_file_to, decrypt_header, encrypt_stream,
@@ -12,7 +13,6 @@ use valv::vault::{
     get_thumbnail_valv_name, is_thumbnail_valv_file, is_valv_file, list_mounts, mount_vault,
     run_sync_daemon, unmount_vault,
 };
-use valv::ValvError;
 
 fn resolve_output_path(
     output: Option<&Path>,
@@ -50,13 +50,19 @@ fn resolve_output_path(
 fn run_encrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), ValvError> {
     if files.is_empty() {
         print_help();
-        return Err(ValvError::Message("No input files specified.".to_string(), 1));
+        return Err(ValvError::Message(
+            "No input files specified.".to_string(),
+            1,
+        ));
     }
 
     let password = read_password(cli)
         .map_err(|e| ValvError::Message(format!("Failed to read password: {}", e), 1))?;
     if password.is_empty() {
-        return Err(ValvError::Message("Password cannot be empty.".to_string(), 1));
+        return Err(ValvError::Message(
+            "Password cannot be empty.".to_string(),
+            1,
+        ));
     }
     let password_bytes = password.as_bytes();
     let iterations = cli.iterations.unwrap_or(DEFAULT_ITERATIONS);
@@ -151,13 +157,19 @@ fn run_encrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), ValvError> {
 fn run_decrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), ValvError> {
     if files.is_empty() {
         print_help();
-        return Err(ValvError::Message("No input files specified.".to_string(), 1));
+        return Err(ValvError::Message(
+            "No input files specified.".to_string(),
+            1,
+        ));
     }
 
     let password = read_password(cli)
         .map_err(|e| ValvError::Message(format!("Failed to read password: {}", e), 1))?;
     if password.is_empty() {
-        return Err(ValvError::Message("Password cannot be empty.".to_string(), 1));
+        return Err(ValvError::Message(
+            "Password cannot be empty.".to_string(),
+            1,
+        ));
     }
     let password_bytes = password.as_bytes();
 
@@ -275,7 +287,10 @@ fn run() -> Result<(), ValvError> {
             let password = read_password(&cli)
                 .map_err(|e| ValvError::Message(format!("Failed to read password: {}", e), 1))?;
             if password.is_empty() {
-                return Err(ValvError::Message("Password cannot be empty.".to_string(), 1));
+                return Err(ValvError::Message(
+                    "Password cannot be empty.".to_string(),
+                    1,
+                ));
             }
 
             let watch_pid = cli

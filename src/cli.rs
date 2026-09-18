@@ -113,7 +113,10 @@ impl CliArgs {
         <Self as Parser>::try_parse_from(itr)
     }
 
-    pub fn resolve_mode_and_files(&self, is_valv_fn: impl Fn(&Path) -> bool) -> (Mode, Vec<PathBuf>) {
+    pub fn resolve_mode_and_files(
+        &self,
+        is_valv_fn: impl Fn(&Path) -> bool,
+    ) -> (Mode, Vec<PathBuf>) {
         if let Some(cmd) = &self.command {
             match cmd {
                 Command::Mount { vault_dir } => {
@@ -130,16 +133,13 @@ impl CliArgs {
                     (Mode::Mount, files)
                 }
                 Command::Unmount { target } => {
-                    let files = target
-                        .as_ref()
-                        .map(|p| vec![p.clone()])
-                        .unwrap_or_else(|| {
-                            if self.files.is_empty() {
-                                vec![PathBuf::from(".")]
-                            } else {
-                                self.files.clone()
-                            }
-                        });
+                    let files = target.as_ref().map(|p| vec![p.clone()]).unwrap_or_else(|| {
+                        if self.files.is_empty() {
+                            vec![PathBuf::from(".")]
+                        } else {
+                            self.files.clone()
+                        }
+                    });
                     (Mode::Unmount, files)
                 }
                 Command::Mounts => (Mode::Mounts, Vec::new()),
