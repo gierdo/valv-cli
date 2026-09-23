@@ -45,6 +45,10 @@ pub struct CliArgs {
     #[arg(long, global = true)]
     pub watch_pid: Option<u32>,
 
+    /// Do not tie mount lifecycle to any process ID
+    #[arg(long, global = true)]
+    pub no_watch: bool,
+
     /// Run mount watcher in foreground
     #[arg(long, global = true)]
     pub foreground: bool,
@@ -84,7 +88,7 @@ pub enum Command {
         /// Files to encrypt
         files: Vec<PathBuf>,
     },
-    /// Decrypt Valv file(s) (v2 and v1)
+    /// Decrypt Valv file(s)
     Decrypt {
         /// Valv files to decrypt
         files: Vec<PathBuf>,

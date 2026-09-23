@@ -24,7 +24,7 @@ end)
 
 local function is_valv_path(path)
 	local filename = path:match("[^/\\]+$") or path
-	return filename:sub(-5) == ".valv" or filename:sub(1, 6) == ".valv."
+	return filename:sub(-5) == ".valv"
 end
 
 local function file_exists(path)

@@ -1,7 +1,8 @@
 # Valv CLI & Yazi Plugin
 
 Standalone CLI tool and Yazi plugin to encrypt, decrypt, and transparently
-mount vaults compatible with [Valv](https://github.com/Arctosoft/Valv-Android)
+mount vaults compatible with [Valv
+v2](https://github.com/Arctosoft/Valv-Android)
 (Android vault application).
 
 ## Key Features

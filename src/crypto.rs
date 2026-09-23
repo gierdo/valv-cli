@@ -11,8 +11,18 @@ use sha2::Sha512;
 
 pub const VALV_V2: u32 = 2;
 pub const DEFAULT_ITERATIONS: u32 = 50_000;
-pub const V1_ITERATIONS: u32 = 20_000;
+pub const MIN_ITERATIONS: u32 = 1_000;
+pub const MAX_ITERATIONS: u32 = 1_000_000;
 pub const BUFFER_SIZE: usize = 64 * 1024;
+
+pub fn zeroize(bytes: &mut [u8]) {
+    for b in bytes.iter_mut() {
+        unsafe {
+            std::ptr::write_volatile(b, 0);
+        }
+    }
+    std::sync::atomic::compiler_fence(std::sync::atomic::Ordering::SeqCst);
+}
 
 const SALT_LEN: usize = 16;
 const IV_LEN: usize = 12;
@@ -102,6 +112,16 @@ pub fn encrypt_stream<R: Read, W: Write>(
     original_name: &str,
     iterations: u32,
 ) -> io::Result<()> {
+    if !(MIN_ITERATIONS..=MAX_ITERATIONS).contains(&iterations) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "Iterations must be between {} and {}",
+                MIN_ITERATIONS, MAX_ITERATIONS
+            ),
+        ));
+    }
+
     let mut rng = rand::rng();
     let mut salt = [0u8; SALT_LEN];
     let mut iv = [0u8; IV_LEN];
@@ -116,8 +136,9 @@ pub fn encrypt_stream<R: Read, W: Write>(
     writer.write_all(&iterations.to_be_bytes())?;
     writer.write_all(&check_bytes)?;
 
-    let key = derive_key(password, &salt, iterations);
+    let mut key = derive_key(password, &salt, iterations);
     let mut cipher = ChaCha20::new(&key.into(), &iv.into());
+    zeroize(&mut key);
 
     let mut encrypted_check = check_bytes;
     cipher.apply_keystream(&mut encrypted_check);
@@ -142,110 +163,78 @@ pub fn encrypt_stream<R: Read, W: Write>(
 pub fn decrypt_header<R: Read>(
     reader: &mut R,
     password: &[u8],
-    is_v1_hint: bool,
 ) -> Result<DecryptedHeader, DecryptError> {
     let mut first4 = [0u8; 4];
     reader.read_exact(&mut first4)?;
     let version = u32::from_be_bytes(first4);
 
-    if version == VALV_V2 && !is_v1_hint {
-        let mut salt = [0u8; SALT_LEN];
-        let mut iv = [0u8; IV_LEN];
-        let mut iters_bytes = [0u8; 4];
-        let mut check_bytes = [0u8; CHECK_LEN];
-
-        reader.read_exact(&mut salt)?;
-        reader.read_exact(&mut iv)?;
-        reader.read_exact(&mut iters_bytes)?;
-        reader.read_exact(&mut check_bytes)?;
-
-        let iterations = u32::from_be_bytes(iters_bytes);
-        let key = derive_key(password, &salt, iterations);
-        let mut cipher = ChaCha20::new(&key.into(), &iv.into());
-
-        let mut dec_check = [0u8; CHECK_LEN];
-        reader.read_exact(&mut dec_check)?;
-        cipher.apply_keystream(&mut dec_check);
-
-        let mut diff = 0u8;
-        for (a, b) in dec_check.iter().zip(check_bytes.iter()) {
-            diff |= a ^ b;
-        }
-        if diff != 0 {
-            return Err(DecryptError::InvalidPassword);
-        }
-
-        let mut nl = [0u8; 1];
-        reader.read_exact(&mut nl)?;
-        cipher.apply_keystream(&mut nl);
-        if nl[0] != b'\n' {
-            return Err(DecryptError::CorruptHeader("Missing initial newline"));
-        }
-
-        let mut json_bytes = Vec::new();
-        let mut byte = [0u8; 1];
-        loop {
-            reader.read_exact(&mut byte)?;
-            cipher.apply_keystream(&mut byte);
-            if byte[0] == b'\n' {
-                break;
-            }
-            json_bytes.push(byte[0]);
-            if json_bytes.len() > 4096 {
-                return Err(DecryptError::CorruptHeader("Metadata exceeds 4KB"));
-            }
-        }
-
-        let meta_str = std::str::from_utf8(&json_bytes)
-            .map_err(|_| DecryptError::CorruptHeader("Invalid UTF-8 in metadata"))?;
-        let meta: ValvMetadata = serde_json::from_str(meta_str)
-            .map_err(|_| DecryptError::CorruptHeader("Invalid JSON metadata"))?;
-
-        Ok(DecryptedHeader {
-            original_name: meta.original_name,
-            cipher,
-        })
-    } else {
-        let mut salt = [0u8; SALT_LEN];
-        salt[..4].copy_from_slice(&first4);
-        reader.read_exact(&mut salt[4..])?;
-
-        let mut iv = [0u8; IV_LEN];
-        reader.read_exact(&mut iv)?;
-
-        let key = derive_key(password, &salt, V1_ITERATIONS);
-        let mut cipher = ChaCha20::new(&key.into(), &iv.into());
-
-        let mut first_enc = [0u8; 1];
-        reader.read_exact(&mut first_enc)?;
-        cipher.apply_keystream(&mut first_enc);
-
-        let mut name_bytes = Vec::new();
-        if first_enc[0] == b'\n' {
-            let mut byte = [0u8; 1];
-            loop {
-                reader.read_exact(&mut byte)?;
-                cipher.apply_keystream(&mut byte);
-                if byte[0] == b'\n' {
-                    break;
-                }
-                name_bytes.push(byte[0]);
-                if name_bytes.len() > 1024 {
-                    return Err(DecryptError::InvalidPassword);
-                }
-            }
-        } else {
-            return Err(DecryptError::InvalidPassword);
-        }
-
-        let original_name =
-            String::from_utf8(name_bytes).map_err(|_| DecryptError::InvalidPassword)?;
-
-        Ok(DecryptedHeader {
-            original_name,
-            cipher,
-        })
+    if version != VALV_V2 {
+        return Err(DecryptError::CorruptHeader("Unsupported file version"));
     }
+
+    let mut salt = [0u8; SALT_LEN];
+    let mut iv = [0u8; IV_LEN];
+    let mut iters_bytes = [0u8; 4];
+    let mut check_bytes = [0u8; CHECK_LEN];
+
+    reader.read_exact(&mut salt)?;
+    reader.read_exact(&mut iv)?;
+    reader.read_exact(&mut iters_bytes)?;
+    reader.read_exact(&mut check_bytes)?;
+
+    let iterations = u32::from_be_bytes(iters_bytes);
+    if !(MIN_ITERATIONS..=MAX_ITERATIONS).contains(&iterations) {
+        return Err(DecryptError::CorruptHeader(
+            "PBKDF2 iterations out of bounds",
+        ));
+    }
+
+    let mut key = derive_key(password, &salt, iterations);
+    let mut cipher = ChaCha20::new(&key.into(), &iv.into());
+    zeroize(&mut key);
+
+    let mut dec_check = [0u8; CHECK_LEN];
+    reader.read_exact(&mut dec_check)?;
+    cipher.apply_keystream(&mut dec_check);
+
+    let mut diff = 0u8;
+    for (a, b) in dec_check.iter().zip(check_bytes.iter()) {
+        diff |= a ^ b;
+    }
+    if diff != 0 {
+        return Err(DecryptError::InvalidPassword);
+    }
+
+    let mut nl = [0u8; 1];
+    reader.read_exact(&mut nl)?;
+    cipher.apply_keystream(&mut nl);
+    if nl[0] != b'\n' {
+        return Err(DecryptError::CorruptHeader("Missing initial newline"));
+    }
+
+    let mut json_bytes = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        reader.read_exact(&mut byte)?;
+        cipher.apply_keystream(&mut byte);
+        if byte[0] == b'\n' {
+            break;
+        }
+        json_bytes.push(byte[0]);
+        if json_bytes.len() > 4096 {
+            return Err(DecryptError::CorruptHeader("Metadata exceeds 4KB"));
+        }
+    }
+
+    let meta_str = std::str::from_utf8(&json_bytes)
+        .map_err(|_| DecryptError::CorruptHeader("Invalid UTF-8 in metadata"))?;
+    let meta: ValvMetadata = serde_json::from_str(meta_str)
+        .map_err(|_| DecryptError::CorruptHeader("Invalid JSON metadata"))?;
+
+    Ok(DecryptedHeader {
+        original_name: meta.original_name,
+        cipher,
+    })
 }
 
 pub fn decrypt_file_to<W: Write>(
@@ -255,14 +244,7 @@ pub fn decrypt_file_to<W: Write>(
 ) -> Result<String, DecryptError> {
     let file = File::open(file_path)?;
     let mut reader = BufReader::with_capacity(BUFFER_SIZE, file);
-
-    let is_v1_hint = file_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n.starts_with(".valv."))
-        .unwrap_or(false);
-
-    let mut header = decrypt_header(&mut reader, password, is_v1_hint)?;
+    let mut header = decrypt_header(&mut reader, password)?;
     header.decrypt_payload(&mut reader, writer)?;
     Ok(header.original_name)
 }
@@ -287,7 +269,19 @@ pub fn encrypt_file(
 }
 
 pub fn decrypt_file(source: &Path, dest: &Path, password: &[u8]) -> Result<String, DecryptError> {
+    #[cfg(unix)]
+    let out_file = {
+        use std::os::unix::fs::OpenOptionsExt;
+        File::options()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(dest)?
+    };
+    #[cfg(not(unix))]
     let out_file = File::create(dest)?;
+
     let mut out_writer = std::io::BufWriter::with_capacity(BUFFER_SIZE, out_file);
     decrypt_file_to(source, password, &mut out_writer)
 }
@@ -314,7 +308,7 @@ mod tests {
 
         let mut enc_cursor = Cursor::new(&encrypted);
         let mut header =
-            decrypt_header(&mut enc_cursor, password, false).expect("Decryption header failed");
+            decrypt_header(&mut enc_cursor, password).expect("Decryption header failed");
         assert_eq!(header.original_name, original_name);
 
         let mut decrypted_payload = Vec::new();
@@ -338,7 +332,62 @@ mod tests {
         encrypt_stream(&mut input, &mut encrypted, password, original_name, 1000).unwrap();
 
         let mut enc_cursor = Cursor::new(&encrypted);
-        let res = decrypt_header(&mut enc_cursor, wrong_password, false);
+        let res = decrypt_header(&mut enc_cursor, wrong_password);
         assert!(matches!(res, Err(DecryptError::InvalidPassword)));
+    }
+
+    #[test]
+    fn test_unsupported_version_rejected() {
+        let bad_version_bytes = [0u8, 0u8, 0u8, 1u8, 0u8, 0u8];
+        let mut cursor = Cursor::new(&bad_version_bytes);
+        let res = decrypt_header(&mut cursor, b"password");
+        assert!(matches!(
+            res,
+            Err(DecryptError::CorruptHeader("Unsupported file version"))
+        ));
+    }
+
+    #[test]
+    fn test_out_of_bounds_iterations_rejected() {
+        let password = b"TestPassword";
+        let payload = b"test";
+
+        // iterations = 0 (below MIN_ITERATIONS)
+        let mut encrypted = Vec::new();
+        let res = encrypt_stream(
+            &mut Cursor::new(payload),
+            &mut encrypted,
+            password,
+            "test.txt",
+            0,
+        );
+        assert!(res.is_err());
+
+        // Construct header with iterations = 0
+        let mut valid = Vec::new();
+        encrypt_stream(
+            &mut Cursor::new(payload),
+            &mut valid,
+            password,
+            "test.txt",
+            1000,
+        )
+        .unwrap();
+        // Offset 4 + 16 (salt) + 12 (iv) = 32 is iterations
+        valid[32..36].copy_from_slice(&0u32.to_be_bytes());
+        let res = decrypt_header(&mut Cursor::new(&valid), password);
+        assert!(matches!(
+            res,
+            Err(DecryptError::CorruptHeader(
+                "PBKDF2 iterations out of bounds"
+            ))
+        ));
+    }
+
+    #[test]
+    fn test_zeroize() {
+        let mut data = [42u8; 32];
+        zeroize(&mut data);
+        assert_eq!(data, [0u8; 32]);
     }
 }
