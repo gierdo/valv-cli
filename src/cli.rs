@@ -13,12 +13,12 @@ pub enum Mode {
     Mounts,
 }
 
-/// Encrypt, decrypt, and transparently mount Valv (.valv) files.
+/// Encrypt, decrypt, and transparently mount Valv (.valv) and Age (.age) files.
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "valv",
-    about = "Encrypt, decrypt, and transparently mount Valv (.valv) files.",
-    after_help = "If no command is specified, Valv files are decrypted, directories with Valv files are mounted, and others are encrypted.",
+    about = "Encrypt, decrypt, and transparently mount Valv (.valv) and Age (.age) files.",
+    after_help = "If no command is specified, vault files are decrypted, directories with vault files are mounted, and others are encrypted.",
     version
 )]
 pub struct CliArgs {
@@ -36,6 +36,26 @@ pub struct CliArgs {
     /// Read password from standard input
     #[arg(long, global = true)]
     pub stdin_password: bool,
+
+    /// Age recipient public key (e.g. age1... or ssh-ed25519 ...) to encrypt to
+    #[arg(short = 'r', long = "recipient", global = true)]
+    pub recipients: Vec<String>,
+
+    /// Path to file containing age recipient public keys
+    #[arg(short = 'R', long = "recipients-file", global = true)]
+    pub recipients_files: Vec<PathBuf>,
+
+    /// Path to age identity file (or SSH private key) to decrypt with
+    #[arg(short = 'k', long = "identity", global = true)]
+    pub identities: Vec<PathBuf>,
+
+    /// Use age encryption format for new files
+    #[arg(long = "age", global = true)]
+    pub age: bool,
+
+    /// Use Valv v2 format
+    #[arg(long = "valv", global = true)]
+    pub valv: bool,
 
     /// Output file or destination directory
     #[arg(short, long, global = true)]
@@ -83,14 +103,14 @@ pub enum Command {
     /// List active vault mounts
     #[command(alias = "list", alias = "ls")]
     Mounts,
-    /// Encrypt file(s) into Valv v2 format
+    /// Encrypt file(s) into Valv or Age format
     Encrypt {
         /// Files to encrypt
         files: Vec<PathBuf>,
     },
-    /// Decrypt Valv file(s)
+    /// Decrypt Valv or Age file(s)
     Decrypt {
-        /// Valv files to decrypt
+        /// Vault files to decrypt
         files: Vec<PathBuf>,
     },
     /// Background daemon to synchronize changes between mount and vault
@@ -263,5 +283,26 @@ mod tests {
         let (mode, files) = cli.resolve_mode_and_files(|_| false);
         assert_eq!(mode, Mode::Mount);
         assert_eq!(files, vec![PathBuf::from(".")]);
+    }
+
+    #[test]
+    fn test_parse_args_age_flags() {
+        let args = vec![
+            "valv",
+            "encrypt",
+            "-r",
+            "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p",
+            "-k",
+            "key.txt",
+            "--age",
+            "doc.pdf",
+        ];
+        let cli = CliArgs::try_parse_from(args).unwrap();
+        assert_eq!(
+            cli.recipients,
+            vec!["age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"]
+        );
+        assert_eq!(cli.identities, vec![PathBuf::from("key.txt")]);
+        assert!(cli.age);
     }
 }

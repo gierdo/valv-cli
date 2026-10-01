@@ -22,7 +22,7 @@ v2](https://github.com/Arctosoft/Valv-Android)
   root permissions, kernel modules, or `sudo`.
 - **Format compatibility**: Full compatibility with Valv file structure version
   2 (ChaCha20 stream cipher, PBKDF2-HMAC-SHA512 key derivation with 50,000
-  iterations). Supports decrypting legacy version 1 files.
+  iterations).
 - **Direct CLI operations**: Fast standalone `encrypt`, `decrypt`, and
   `--stdout` streaming commands for scripting and single/batch file operations.
 
