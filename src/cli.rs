@@ -5,6 +5,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
+    Init,
     Encrypt,
     Decrypt,
     Mount,
@@ -92,6 +93,12 @@ pub struct CliArgs {
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// Initialize a new vault with an encrypted manifest
+    #[command(alias = "create", alias = "new")]
+    Init {
+        /// Vault directory to initialize (defaults to current directory)
+        path: Option<PathBuf>,
+    },
     /// Transparently mount vault into in-memory directory
     #[command(alias = "open")]
     Mount {
@@ -147,6 +154,19 @@ impl CliArgs {
     ) -> (Mode, Vec<PathBuf>) {
         if let Some(cmd) = &self.command {
             match cmd {
+                Command::Init { path } => {
+                    let files = path
+                        .as_ref()
+                        .map(|p| vec![p.clone()])
+                        .unwrap_or_else(|| {
+                            if self.files.is_empty() {
+                                vec![PathBuf::from(".")]
+                            } else {
+                                self.files.clone()
+                            }
+                        });
+                    (Mode::Init, files)
+                }
                 Command::Mount { vault_dir } => {
                     let files = vault_dir
                         .as_ref()
@@ -308,5 +328,30 @@ mod tests {
         );
         assert_eq!(cli.identities, vec![PathBuf::from("key.txt")]);
         assert!(cli.age);
+    }
+
+    #[test]
+    fn test_parse_args_init() {
+        let args = vec![
+            "valv",
+            "init",
+            "new_vault",
+            "-r",
+            "age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p",
+        ];
+        let cli = CliArgs::try_parse_from(args).unwrap();
+        let (mode, files) = cli.resolve_mode_and_files(|_| false);
+        assert_eq!(mode, Mode::Init);
+        assert_eq!(files, vec![PathBuf::from("new_vault")]);
+        assert_eq!(
+            cli.recipients,
+            vec!["age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p"]
+        );
+
+        let args_create = vec!["valv", "create"];
+        let cli_create = CliArgs::try_parse_from(args_create).unwrap();
+        let (mode_create, files_create) = cli_create.resolve_mode_and_files(|_| false);
+        assert_eq!(mode_create, Mode::Init);
+        assert_eq!(files_create, vec![PathBuf::from(".")]);
     }
 }

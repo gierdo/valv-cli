@@ -5,7 +5,7 @@ pub mod session;
 pub mod sync;
 pub mod thumbnail;
 
-pub use manifest::save_encrypted_manifest;
+pub use manifest::{create_encrypted_manifest, save_encrypted_manifest, write_encrypted_manifest_bytes};
 pub use mount::{mount_vault, mount_vault_with_credentials};
 pub use paths::{
     clean_empty_dirs_up_to, collect_plain_files, collect_vault_files, generate_random_filename,
@@ -601,6 +601,72 @@ mod tests {
         assert!(mount_dir.join(".age_vault.toml").exists(), "Decrypted manifest should be visible in mount_dir");
         unmount_vault(&mount_dir).expect("Unmount should succeed");
         daemon_handle.join().expect("Daemon thread joined").expect("Daemon run succeeded");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_create_encrypted_manifest_and_mount() {
+        let temp_dir = std::env::temp_dir().join(format!("valv_init_test_{}", rand::rng().random::<u32>()));
+        let vault_dir = temp_dir.join("vault");
+        let mount_dir = temp_dir.join("mount");
+        fs::create_dir_all(&vault_dir).unwrap();
+
+        let key = age::x25519::Identity::generate();
+        let pubkey = key.to_public();
+
+        let manifest = crate::config::AgeVaultManifest {
+            recipients: vec![pubkey.to_string()],
+            recipients_files: Vec::new(),
+        };
+        let recips = vec![Box::new(pubkey.clone()) as Box<dyn age::Recipient + Send>];
+        let creds = Credentials::new();
+
+        let created_path = create_encrypted_manifest(&vault_dir, &manifest, VaultFormat::Age, &recips, &creds, 1000)
+            .expect("create_encrypted_manifest should succeed");
+
+        assert_eq!(created_path, vault_dir.join(".age_vault.toml.age"));
+        assert!(created_path.exists());
+        assert!(!vault_dir.join(".age_vault.toml").exists());
+
+        // Verify that it loads and decrypts with key
+        let creds_with_key = Credentials::new().with_identities(vec![Box::new(key.clone())]);
+        let loaded = crate::config::AgeVaultManifest::load_from_dir_with_credentials(&vault_dir, &creds_with_key)
+            .expect("Should load from dir with credentials");
+        assert!(loaded.is_some());
+        let (loaded_manifest, _, _) = loaded.unwrap();
+        assert_eq!(loaded_manifest.recipients, vec![pubkey.to_string()]);
+
+        // Mount vault and verify decrypted manifest
+        let v_dir = vault_dir.clone();
+        let m_dir = mount_dir.clone();
+        let key_clone = key.clone();
+        let daemon_handle = thread::spawn(move || {
+            let creds_with_key = Credentials::new().with_identities(vec![Box::new(key_clone)]);
+            mount_vault_with_credentials(
+                &v_dir,
+                &m_dir,
+                &creds_with_key,
+                None,
+                true,
+                1000,
+                VaultFormat::Age,
+                &[],
+                &[],
+                &[],
+            )
+        });
+
+        for _ in 0..50 {
+            if mount_dir.join(".age_vault.toml").exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(mount_dir.join(".age_vault.toml").exists());
+        unmount_vault(&mount_dir).expect("Unmount should succeed");
+        daemon_handle.join().expect("Daemon thread joined").expect("Daemon succeeded");
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

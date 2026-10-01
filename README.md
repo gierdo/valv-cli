@@ -118,6 +118,19 @@ open/lock vaults or encrypt/decrypt files.
 
 ## CLI Usage
 
+### Vault Initialization
+
+```sh
+# Initialize a new Age vault with recipient public keys
+valv init ~/Pictures/Vault -r age1ql3z7hjy54pw3hyww5ayyfg7zqgvc7w3j2elw8zmrj2kg5sfn9aqmcac8p
+
+# Initialize with recipients from a recipients file
+valv init ~/Pictures/Vault -R ~/.config/age/recipients.txt
+
+# Initialize in the current directory using identities/recipients from SOPS or config.toml
+valv init
+```
+
 ### Transparent Mount Commands
 
 ```sh

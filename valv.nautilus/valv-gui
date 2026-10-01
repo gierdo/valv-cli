@@ -51,14 +51,19 @@ action_mount() {
     local vault_name
     vault_name=$(basename "$target")
 
-    local password
-    password=$(zenity --password --title="Valv: Unlock '$vault_name'") || exit 0
-    if [ -z "$password" ]; then
-        exit 0
-    fi
-
+    # 1. Try automatic mount with identities first (SOPS/config age identities)
     local output exit_code
-    output=$(printf '%s\n' "$password" | valv mount "$target" --stdin-password --no-watch 2>&1) && exit_code=0 || exit_code=$?
+    output=$(valv mount "$target" --no-watch 2>&1) && exit_code=0 || exit_code=$?
+
+    # 2. Prompt for password/passphrase if needed
+    if [ "$exit_code" -ne 0 ]; then
+        local password
+        password=$(zenity --password --title="Valv: Unlock '$vault_name'") || exit 0
+        if [ -z "$password" ]; then
+            exit 0
+        fi
+        output=$(printf '%s\n' "$password" | valv mount "$target" --stdin-password --no-watch 2>&1) && exit_code=0 || exit_code=$?
+    fi
 
     if [ "$exit_code" -eq 0 ]; then
         local mount_dir
@@ -70,11 +75,81 @@ action_mount() {
             xdg-open "$mount_dir" >/dev/null 2>&1 &
         fi
     elif [ "$exit_code" -eq 2 ]; then
-        zenity --error --title="Valv" --text="Incorrect password for vault '$vault_name'."
+        zenity --error --title="Valv" --text="Incorrect password or identity failed for vault '$vault_name'."
         exit 2
     else
         zenity --error --title="Valv" --text="Failed to mount vault:\n$output"
         exit "$exit_code"
+    fi
+}
+
+action_init() {
+    local target="${1:-}"
+    if [ -z "$target" ]; then
+        if [ -n "${NAUTILUS_SCRIPT_SELECTED_FILE_PATHS:-}" ]; then
+            target=$(head -n1 <<< "$NAUTILUS_SCRIPT_SELECTED_FILE_PATHS")
+        elif [ -n "${NAUTILUS_SCRIPT_CURRENT_URI:-}" ]; then
+            target=$(uri_to_path "$NAUTILUS_SCRIPT_CURRENT_URI")
+        else
+            target="$PWD"
+        fi
+    fi
+
+    if [ -f "$target" ]; then
+        target=$(dirname "$target")
+    fi
+
+    local vault_type
+    vault_type=$(zenity --list --radiolist --title="Valv: Create New Vault" \
+        --column="Select" --column="Vault Type" --column="Description" \
+        TRUE "Age" "Modern asymmetric key encryption with encrypted manifest" \
+        FALSE "Valv" "Password-based ChaCha20-Poly1305 vault (v2)" \
+        --height=220 --width=520) || exit 0
+
+    if [ "$vault_type" = "Age" ]; then
+        local recip
+        recip=$(zenity --entry --title="Valv: Age Vault Setup" \
+            --text="Enter Age recipient public key(s) (optional):\nLeave blank to auto-detect from SOPS/config identity" \
+            --width=450) || exit 0
+
+        local output exit_code
+        if [ -n "$recip" ]; then
+            output=$(valv init "$target" -r "$recip" 2>&1) && exit_code=0 || exit_code=$?
+        else
+            output=$(valv init "$target" 2>&1) && exit_code=0 || exit_code=$?
+            if [ "$exit_code" -ne 0 ]; then
+                local pwd
+                pwd=$(zenity --password --title="Valv: Set Age Passphrase") || exit 0
+                [ -z "$pwd" ] && exit 0
+                output=$(printf '%s\n' "$pwd" | valv init "$target" --age --stdin-password 2>&1) && exit_code=0 || exit_code=$?
+            fi
+        fi
+
+        if [ "$exit_code" -eq 0 ]; then
+            if command -v notify-send >/dev/null 2>&1; then
+                notify-send "Valv" "Created Age vault at $(basename "$target")"
+            fi
+            action_mount "$target"
+        else
+            zenity --error --title="Valv" --text="Failed to create Age vault:\n$output"
+            exit "$exit_code"
+        fi
+    elif [ "$vault_type" = "Valv" ]; then
+        local pwd
+        pwd=$(zenity --password --title="Valv: Set Vault Password") || exit 0
+        [ -z "$pwd" ] && exit 0
+
+        local output exit_code
+        output=$(printf '%s\n' "$pwd" | valv init "$target" --valv --stdin-password 2>&1) && exit_code=0 || exit_code=$?
+        if [ "$exit_code" -eq 0 ]; then
+            if command -v notify-send >/dev/null 2>&1; then
+                notify-send "Valv" "Created Valv vault at $(basename "$target")"
+            fi
+            action_mount "$target"
+        else
+            zenity --error --title="Valv" --text="Failed to create Valv vault:\n$output"
+            exit "$exit_code"
+        fi
     fi
 }
 
@@ -116,18 +191,32 @@ action_encrypt() {
         exit 1
     fi
 
-    local password
-    password=$(zenity --password --title="Valv: Encrypt ${#files[@]} File(s)") || exit 0
-    if [ -z "$password" ]; then
-        exit 0
-    fi
+    local enc_type
+    enc_type=$(zenity --list --radiolist --title="Valv: Choose Encryption Format" \
+        --column="Select" --column="Format" --column="Description" \
+        TRUE "Age" "Age format (.age)" \
+        FALSE "Valv" "Valv v2 format (.valv)" \
+        --height=200 --width=450) || exit 0
 
     local output exit_code
-    output=$(printf '%s\n' "$password" | valv encrypt "${files[@]}" --stdin-password 2>&1) && exit_code=0 || exit_code=$?
+    if [ "$enc_type" = "Age" ]; then
+        output=$(valv encrypt --age "${files[@]}" 2>&1) && exit_code=0 || exit_code=$?
+        if [ "$exit_code" -ne 0 ]; then
+            local password
+            password=$(zenity --password --title="Valv: Age Passphrase for ${#files[@]} File(s)") || exit 0
+            [ -z "$password" ] && exit 0
+            output=$(printf '%s\n' "$password" | valv encrypt --age "${files[@]}" --stdin-password 2>&1) && exit_code=0 || exit_code=$?
+        fi
+    else
+        local password
+        password=$(zenity --password --title="Valv: Encrypt ${#files[@]} File(s)") || exit 0
+        [ -z "$password" ] && exit 0
+        output=$(printf '%s\n' "$password" | valv encrypt "${files[@]}" --stdin-password 2>&1) && exit_code=0 || exit_code=$?
+    fi
 
     if [ "$exit_code" -eq 0 ]; then
         if command -v notify-send >/dev/null 2>&1; then
-            notify-send "Valv" "Encrypted ${#files[@]} file(s) with thumbnails."
+            notify-send "Valv" "Encrypted ${#files[@]} file(s)."
         fi
     else
         zenity --error --title="Valv" --text="Encryption failed:\n$output"
@@ -146,21 +235,23 @@ action_decrypt() {
         exit 1
     fi
 
-    local password
-    password=$(zenity --password --title="Valv: Decrypt ${#files[@]} File(s)") || exit 0
-    if [ -z "$password" ]; then
-        exit 0
-    fi
-
+    # Try automatic decryption with identities first
     local output exit_code
-    output=$(printf '%s\n' "$password" | valv decrypt "${files[@]}" --stdin-password 2>&1) && exit_code=0 || exit_code=$?
+    output=$(valv decrypt "${files[@]}" 2>&1) && exit_code=0 || exit_code=$?
+
+    if [ "$exit_code" -ne 0 ]; then
+        local password
+        password=$(zenity --password --title="Valv: Decrypt ${#files[@]} File(s)") || exit 0
+        [ -z "$password" ] && exit 0
+        output=$(printf '%s\n' "$password" | valv decrypt "${files[@]}" --stdin-password 2>&1) && exit_code=0 || exit_code=$?
+    fi
 
     if [ "$exit_code" -eq 0 ]; then
         if command -v notify-send >/dev/null 2>&1; then
             notify-send "Valv" "Decrypted ${#files[@]} file(s)."
         fi
     elif [ "$exit_code" -eq 2 ]; then
-        zenity --error --title="Valv" --text="Incorrect password."
+        zenity --error --title="Valv" --text="Incorrect password or identity decryption failed."
         exit 2
     else
         zenity --error --title="Valv" --text="Decryption failed:\n$output"
@@ -174,6 +265,9 @@ shift || true
 case "$action" in
     mount|open)
         action_mount "$@"
+        ;;
+    init|create|new)
+        action_init "$@"
         ;;
     unmount|close|lock)
         action_unmount "$@"

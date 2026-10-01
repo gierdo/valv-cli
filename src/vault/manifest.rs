@@ -1,28 +1,20 @@
 use std::fs::{self, File};
 use std::io::{BufWriter, Cursor, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::ValvError;
+use crate::config::AgeVaultManifest;
 use crate::crypto::{encrypt_stream_unified, Credentials, EncryptionMethod, VaultFormat};
 
-pub fn save_encrypted_manifest(
-    mount_manifest_path: &Path,
+pub fn write_encrypted_manifest_bytes(
+    plaintext: &[u8],
+    orig_name: &str,
     vault_dir: &Path,
     format: VaultFormat,
     recipients: &[Box<dyn age::Recipient + Send>],
     credentials: &Credentials,
     iterations: u32,
-) -> Result<(), ValvError> {
-    if !mount_manifest_path.is_file() {
-        return Ok(());
-    }
-
-    let plaintext = fs::read(mount_manifest_path)?;
-    let orig_name = mount_manifest_path
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or(".age_vault.toml");
-
+) -> Result<PathBuf, ValvError> {
     let method = if format == VaultFormat::Age || !recipients.is_empty() {
         if !recipients.is_empty() {
             Some(EncryptionMethod::AgeRecipients(recipients))
@@ -45,7 +37,12 @@ pub fn save_encrypted_manifest(
 
     let method = match method {
         Some(m) => m,
-        None => return Ok(()),
+        None => {
+            return Err(ValvError::Message(
+                "Cannot encrypt manifest: no recipients, password, or identity provided.".to_string(),
+                1,
+            ));
+        }
     };
 
     let target_name = if orig_name.starts_with('.') {
@@ -63,7 +60,7 @@ pub fn save_encrypted_manifest(
     let target_path = vault_dir.join(target_name);
     let mut out_file = BufWriter::new(File::create(&target_path)?);
     encrypt_stream_unified(
-        &mut Cursor::new(&plaintext),
+        &mut Cursor::new(plaintext),
         &mut out_file,
         orig_name,
         &method,
@@ -82,5 +79,56 @@ pub fn save_encrypted_manifest(
         let _ = fs::remove_file(unencrypted_in_vault);
     }
 
+    Ok(target_path)
+}
+
+pub fn save_encrypted_manifest(
+    mount_manifest_path: &Path,
+    vault_dir: &Path,
+    format: VaultFormat,
+    recipients: &[Box<dyn age::Recipient + Send>],
+    credentials: &Credentials,
+    iterations: u32,
+) -> Result<(), ValvError> {
+    if !mount_manifest_path.is_file() {
+        return Ok(());
+    }
+
+    let plaintext = fs::read(mount_manifest_path)?;
+    let orig_name = mount_manifest_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(".age_vault.toml");
+
+    write_encrypted_manifest_bytes(
+        &plaintext,
+        orig_name,
+        vault_dir,
+        format,
+        recipients,
+        credentials,
+        iterations,
+    )?;
     Ok(())
+}
+
+pub fn create_encrypted_manifest(
+    vault_dir: &Path,
+    manifest: &AgeVaultManifest,
+    format: VaultFormat,
+    recipients: &[Box<dyn age::Recipient + Send>],
+    credentials: &Credentials,
+    iterations: u32,
+) -> Result<PathBuf, ValvError> {
+    let toml_str = toml::to_string_pretty(manifest)
+        .map_err(|e| ValvError::Message(format!("Failed to serialize manifest to TOML: {}", e), 1))?;
+    write_encrypted_manifest_bytes(
+        toml_str.as_bytes(),
+        ".age_vault.toml",
+        vault_dir,
+        format,
+        recipients,
+        credentials,
+        iterations,
+    )
 }

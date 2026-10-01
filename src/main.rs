@@ -9,14 +9,14 @@ use valv::config::{AgeVaultManifest, ValvConfig};
 use valv::crypto::{
     BUFFER_SIZE, Credentials, DEFAULT_ITERATIONS, DecryptError, EncryptionMethod, VaultFormat,
     decrypt_file_with_credentials_to, decrypt_header_with_credentials, encrypt_stream_unified,
-    load_identities, load_recipients,
+    extract_recipients_from_identity_file, load_identities, load_recipients,
 };
 use valv::vault::{
-    collect_plain_files, collect_vault_files, create_thumbnail_file_unified,
-    generate_random_filename, get_mount_dir, get_suffix_for_path_and_format,
-    get_thumbnail_valv_name, is_thumbnail_valv_file, is_valv_file, list_mounts,
-    mount_vault_with_credentials, run_sync_daemon_with_credentials, sanitize_filename,
-    save_encrypted_manifest, unmount_vault,
+    collect_plain_files, collect_vault_files, create_encrypted_manifest,
+    create_thumbnail_file_unified, generate_random_filename, get_mount_dir,
+    get_suffix_for_path_and_format, get_thumbnail_valv_name, is_thumbnail_valv_file,
+    is_valv_file, list_mounts, mount_vault_with_credentials,
+    run_sync_daemon_with_credentials, sanitize_filename, save_encrypted_manifest, unmount_vault,
 };
 
 fn resolve_output_path(
@@ -478,6 +478,111 @@ fn run_decrypt(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<
     res
 }
 
+fn run_init(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<(), ValvError> {
+    let vault_dir = files.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+    fs::create_dir_all(&vault_dir)?;
+
+    if let Some(existing) = AgeVaultManifest::find_in_dir(&vault_dir)
+        && !cli.force
+    {
+        return Err(ValvError::Message(
+            format!(
+                "Vault manifest already exists at {} (use -f to overwrite)",
+                existing.display()
+            ),
+            1,
+        ));
+    }
+
+    let identity_paths = config.resolve_identities(&cli.identities);
+    let (mut recipient_strs, recipient_file_paths) = if !cli.recipients.is_empty() || !cli.recipients_files.is_empty() {
+        (cli.recipients.clone(), cli.recipients_files.clone())
+    } else {
+        (config.resolve_recipients(&cli.recipients), config.resolve_recipients_files(&cli.recipients_files))
+    };
+
+    if recipient_strs.is_empty() && recipient_file_paths.is_empty() {
+        for id_path in &identity_paths {
+            let derived = extract_recipients_from_identity_file(id_path);
+            for d in derived {
+                if !recipient_strs.contains(&d) {
+                    recipient_strs.push(d);
+                }
+            }
+        }
+    }
+
+    let identities = load_identities(&identity_paths)
+        .map_err(|e| ValvError::Message(e.to_string(), 1))?;
+    let recipients = load_recipients(&recipient_strs, &recipient_file_paths)
+        .map_err(|e| ValvError::Message(e.to_string(), 1))?;
+
+    let format = if cli.valv {
+        VaultFormat::Valv
+    } else {
+        VaultFormat::Age
+    };
+
+    let mut password = if recipients.is_empty() {
+        let pwd = read_password(cli)
+            .map_err(|e| ValvError::Message(format!("Failed to read password: {}", e), 1))?
+            .into_bytes();
+        if pwd.is_empty() {
+            return Err(ValvError::Message(
+                "No recipients or passphrase provided to initialize vault. Specify -r <recipient> or enter a passphrase.".to_string(),
+                1,
+            ));
+        }
+        Some(pwd)
+    } else {
+        None
+    };
+
+    let mut credentials = Credentials::new().with_identities(identities);
+    if let Some(ref pwd) = password {
+        credentials.password = Some(pwd.clone());
+    }
+
+    let manifest = AgeVaultManifest {
+        recipients: recipient_strs.clone(),
+        recipients_files: recipient_file_paths,
+    };
+
+    let iterations = cli.iterations.unwrap_or(DEFAULT_ITERATIONS);
+    let manifest_path = create_encrypted_manifest(
+        &vault_dir,
+        &manifest,
+        format,
+        &recipients,
+        &credentials,
+        iterations,
+    )?;
+
+    if let Some(ref mut pwd) = password {
+        valv::crypto::zeroize(pwd);
+    }
+    if let Some(ref mut pwd) = credentials.password {
+        valv::crypto::zeroize(pwd);
+    }
+
+    if !recipient_strs.is_empty() {
+        println!(
+            "Initialized encrypted Age vault at: {} ({} recipient(s) configured in {})",
+            vault_dir.display(),
+            recipient_strs.len(),
+            manifest_path.file_name().unwrap_or_default().to_string_lossy()
+        );
+    } else {
+        println!(
+            "Initialized encrypted vault at: {} ({})",
+            vault_dir.display(),
+            manifest_path.file_name().unwrap_or_default().to_string_lossy()
+        );
+    }
+
+    Ok(())
+}
+
 fn run_mount(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<(), ValvError> {
     let vault_dir = files.first().cloned().unwrap_or_else(|| PathBuf::from("."));
     if !vault_dir.is_dir() {
@@ -667,6 +772,7 @@ fn run() -> Result<(), ValvError> {
     let (mode, files) = cli.resolve_mode_and_files(is_valv_file);
 
     match mode {
+        Mode::Init => run_init(&cli, &config, &files)?,
         Mode::Mount => run_mount(&cli, &config, &files)?,
         Mode::Unmount => run_unmount(&files)?,
         Mode::Mounts => run_mounts(),
@@ -982,6 +1088,44 @@ mod tests {
             fs::read_to_string(dec_dir.join("doc.txt")).unwrap(),
             "configured age encryption"
         );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_cli_init_age_vault_roundtrip() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("valv_cli_init_test_{}", rand::random::<u32>()));
+        let vault_dir = temp_dir.join("my_age_vault");
+
+        let key = age::x25519::Identity::generate();
+        let pubkey = key.to_public().to_string();
+
+        let init_args = vec![
+            "valv",
+            "init",
+            "-r",
+            &pubkey,
+            vault_dir.to_str().unwrap(),
+        ];
+        let cli_init = CliArgs::try_parse_from(init_args).unwrap();
+        let (_mode_init, files_init) = cli_init.resolve_mode_and_files(is_valv_file);
+        run_init(&cli_init, &ValvConfig::default(), &files_init).expect("run_init should succeed");
+
+        assert!(vault_dir.join(".age_vault.toml.age").exists());
+        assert!(!vault_dir.join(".age_vault.toml").exists());
+
+        // Test that second init fails without -f
+        let init_dup_args = vec![
+            "valv",
+            "init",
+            "-r",
+            &pubkey,
+            vault_dir.to_str().unwrap(),
+        ];
+        let cli_init_dup = CliArgs::try_parse_from(init_dup_args).unwrap();
+        let (_mode_dup, files_dup) = cli_init_dup.resolve_mode_and_files(is_valv_file);
+        assert!(run_init(&cli_init_dup, &ValvConfig::default(), &files_dup).is_err());
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

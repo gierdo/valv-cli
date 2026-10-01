@@ -7,7 +7,8 @@ use std::io::{self, BufReader, Cursor, Read, Write};
 use std::path::Path;
 
 pub use age_format::{
-    encrypt_stream_age_passphrase, encrypt_stream_age_recipients, load_identities, load_recipients,
+    encrypt_stream_age_passphrase, encrypt_stream_age_recipients,
+    extract_recipients_from_identity_file, load_identities, load_recipients,
 };
 pub use types::{
     zeroize, Credentials, DecryptError, DecryptedHeader, DecryptedPayload, EncryptionMethod,
@@ -347,5 +348,34 @@ mod tests {
             .decrypt_payload(&mut decrypted_payload)
             .expect("Key payload decryption failed");
         assert_eq!(decrypted_payload, payload);
+    }
+
+    #[test]
+    fn test_extract_recipients_from_identity_file() {
+        use age::secrecy::ExposeSecret;
+        let key = age::x25519::Identity::generate();
+        let pubkey = key.to_public();
+
+        let temp_dir = std::env::temp_dir().join(format!("valv_id_test_{}", rand::random::<u32>()));
+        let _ = std::fs::create_dir_all(&temp_dir);
+        let key_file = temp_dir.join("keys.txt");
+
+        // Format 1: With "# public key:" header
+        let content = format!(
+            "# created: 2026-01-01\n# public key: {}\n{}\n",
+            pubkey,
+            key.to_string().expose_secret()
+        );
+        std::fs::write(&key_file, &content).unwrap();
+        let extracted = extract_recipients_from_identity_file(&key_file);
+        assert_eq!(extracted, vec![pubkey.to_string()]);
+
+        // Format 2: Just the secret key
+        let content_raw = format!("{}\n", key.to_string().expose_secret());
+        std::fs::write(&key_file, &content_raw).unwrap();
+        let extracted_raw = extract_recipients_from_identity_file(&key_file);
+        assert_eq!(extracted_raw, vec![pubkey.to_string()]);
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

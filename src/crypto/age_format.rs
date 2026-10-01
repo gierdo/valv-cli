@@ -93,3 +93,30 @@ pub fn load_recipients(
         )
     })
 }
+
+pub fn extract_recipients_from_identity_file(path: &std::path::Path) -> Vec<String> {
+    use std::str::FromStr;
+    let mut recipients = Vec::new();
+    if let Ok(content) = std::fs::read_to_string(path) {
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if let Some(pubkey) = trimmed
+                .strip_prefix("# public key: ")
+                .or_else(|| trimmed.strip_prefix("# Public key: "))
+            {
+                let pk = pubkey.trim().to_string();
+                if !pk.is_empty() && !recipients.contains(&pk) {
+                    recipients.push(pk);
+                }
+            } else if trimmed.starts_with("AGE-SECRET-KEY-1")
+                && let Ok(identity) = age::x25519::Identity::from_str(trimmed)
+            {
+                let pk = identity.to_public().to_string();
+                if !recipients.contains(&pk) {
+                    recipients.push(pk);
+                }
+            }
+        }
+    }
+    recipients
+}
