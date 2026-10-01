@@ -1,5 +1,4 @@
 use std::io::{self, Read, Write};
-use chacha20::ChaCha20;
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroize;
 
@@ -26,6 +25,7 @@ pub struct ValvMetadata {
 #[derive(Debug)]
 pub enum DecryptError {
     InvalidPassword,
+    ExcessiveWork,
     CorruptHeader(&'static str),
     Io(io::Error),
 }
@@ -33,7 +33,8 @@ pub enum DecryptError {
 impl std::fmt::Display for DecryptError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DecryptError::InvalidPassword => write!(f, "Invalid password"),
+            DecryptError::InvalidPassword => write!(f, "Invalid password or key"),
+            DecryptError::ExcessiveWork => write!(f, "Decryption requires excessive work"),
             DecryptError::CorruptHeader(msg) => write!(f, "Corrupt file header: {}", msg),
             DecryptError::Io(e) => write!(f, "I/O error: {}", e),
         }
@@ -52,6 +53,24 @@ impl std::error::Error for DecryptError {
 impl From<io::Error> for DecryptError {
     fn from(e: io::Error) -> Self {
         DecryptError::Io(e)
+    }
+}
+
+impl From<age::DecryptError> for DecryptError {
+    fn from(err: age::DecryptError) -> Self {
+        match err {
+            age::DecryptError::ExcessiveWork { .. } => DecryptError::ExcessiveWork,
+            age::DecryptError::InvalidHeader => DecryptError::CorruptHeader("Invalid age header"),
+            age::DecryptError::InvalidMac => DecryptError::CorruptHeader("Invalid age header MAC"),
+            age::DecryptError::UnknownFormat => {
+                DecryptError::CorruptHeader("Unsupported file version")
+            }
+            age::DecryptError::Io(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                DecryptError::CorruptHeader("Invalid or truncated header")
+            }
+            age::DecryptError::Io(e) => DecryptError::Io(e),
+            _ => DecryptError::InvalidPassword,
+        }
     }
 }
 
@@ -104,30 +123,76 @@ pub enum EncryptionMethod<'a> {
     },
 }
 
-pub enum DecryptedPayload<'a> {
-    Valv {
-        cipher: ChaCha20,
-        reader: Box<dyn Read + Send + 'a>,
-    },
-    Age(Box<dyn Read + Send + 'a>),
+pub fn write_metadata_prefix<W: Write>(writer: &mut W, original_name: &str) -> io::Result<()> {
+    let meta = serde_json::to_string(&ValvMetadata {
+        original_name: original_name.to_string(),
+    })
+    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+
+    let mut prefix_bytes = Vec::with_capacity(meta.len() + 2);
+    prefix_bytes.push(b'\n');
+    prefix_bytes.extend_from_slice(meta.as_bytes());
+    prefix_bytes.push(b'\n');
+    writer.write_all(&prefix_bytes)?;
+    Ok(())
+}
+
+pub fn extract_metadata_from_stream<'a, R: Read + Send + 'a>(
+    mut reader: R,
+) -> (String, Box<dyn Read + Send + 'a>) {
+    let mut first_byte = [0u8; 1];
+    if let Ok(1) = reader.read(&mut first_byte) {
+        if first_byte[0] == b'\n' {
+            let mut buf = Vec::new();
+            let mut byte = [0u8; 1];
+            let mut found_newline = false;
+            while buf.len() < 4096 {
+                match reader.read(&mut byte) {
+                    Ok(1) => {
+                        if byte[0] == b'\n' {
+                            found_newline = true;
+                            break;
+                        }
+                        buf.push(byte[0]);
+                    }
+                    _ => break,
+                }
+            }
+
+            if found_newline
+                && let Ok(meta_str) = std::str::from_utf8(&buf)
+                && let Ok(meta) = serde_json::from_str::<ValvMetadata>(meta_str)
+            {
+                return (meta.original_name, Box::new(reader));
+            } else {
+                let mut full_buf =
+                    Vec::with_capacity(1 + buf.len() + if found_newline { 1 } else { 0 });
+                full_buf.push(b'\n');
+                full_buf.extend_from_slice(&buf);
+                if found_newline {
+                    full_buf.push(b'\n');
+                }
+                let chained = std::io::Cursor::new(full_buf).chain(reader);
+                return ("decrypted_file".to_string(), Box::new(chained));
+            }
+        } else {
+            let chained = std::io::Cursor::new(vec![first_byte[0]]).chain(reader);
+            return ("decrypted_file".to_string(), Box::new(chained));
+        }
+    }
+
+    ("decrypted_file".to_string(), Box::new(reader))
 }
 
 pub struct DecryptedHeader<'a> {
     pub original_name: String,
-    pub payload: DecryptedPayload<'a>,
+    pub payload: Box<dyn Read + Send + 'a>,
 }
 
 impl<'a> DecryptedHeader<'a> {
     pub fn decrypt_payload<W: Write>(&mut self, writer: &mut W) -> io::Result<()> {
-        match &mut self.payload {
-            DecryptedPayload::Valv { cipher, reader } => {
-                crate::crypto::valv_format::transform_stream(cipher, reader, writer)
-            }
-            DecryptedPayload::Age(age_reader) => {
-                io::copy(age_reader, writer)?;
-                writer.flush()?;
-                Ok(())
-            }
-        }
+        io::copy(&mut self.payload, writer)?;
+        writer.flush()?;
+        Ok(())
     }
 }

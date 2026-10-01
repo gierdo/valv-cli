@@ -11,7 +11,7 @@ pub use age_format::{
     extract_recipients_from_identity_file, load_identities, load_recipients,
 };
 pub use types::{
-    zeroize, Credentials, DecryptError, DecryptedHeader, DecryptedPayload, EncryptionMethod,
+    zeroize, Credentials, DecryptError, DecryptedHeader, EncryptionMethod,
     VaultFormat, BUFFER_SIZE, DEFAULT_ITERATIONS, MAX_ITERATIONS, MIN_ITERATIONS, VALV_V2,
 };
 pub use valv_format::{derive_key, encrypt_file, encrypt_stream, transform_stream};
@@ -58,10 +58,7 @@ pub fn decrypt_header_with_credentials<'a, R: Read + Send + 'a>(
     }
 
     let chained = Cursor::new(first4[..n].to_vec()).chain(reader);
-    let decryptor = match age::Decryptor::new(chained) {
-        Ok(d) => d,
-        Err(_) => return Err(DecryptError::CorruptHeader("Unsupported file version")),
-    };
+    let decryptor = age::Decryptor::new(chained).map_err(DecryptError::from)?;
 
     let mut scrypt_id = None;
     if let Some(ref pwd) = credentials.password
@@ -86,64 +83,13 @@ pub fn decrypt_header_with_credentials<'a, R: Read + Send + 'a>(
         return Err(DecryptError::InvalidPassword);
     }
 
-    let mut stream_reader = match decryptor.decrypt(id_refs.into_iter()) {
-        Ok(r) => r,
-        Err(_) => return Err(DecryptError::InvalidPassword),
-    };
-
-    let mut first_byte = [0u8; 1];
-    let read_res = stream_reader.read(&mut first_byte);
-    if let Ok(1) = read_res {
-        if first_byte[0] == b'\n' {
-            let mut buf = Vec::new();
-            let mut byte = [0u8; 1];
-            let mut found_newline = false;
-            while buf.len() < 4096 {
-                match stream_reader.read(&mut byte) {
-                    Ok(1) => {
-                        if byte[0] == b'\n' {
-                            found_newline = true;
-                            break;
-                        }
-                        buf.push(byte[0]);
-                    }
-                    _ => break,
-                }
-            }
-
-            if found_newline
-                && let Ok(meta_str) = std::str::from_utf8(&buf)
-                && let Ok(meta) = serde_json::from_str::<types::ValvMetadata>(meta_str)
-            {
-                return Ok(DecryptedHeader {
-                    original_name: meta.original_name,
-                    payload: DecryptedPayload::Age(Box::new(stream_reader)),
-                });
-            } else {
-                let mut full_buf = Vec::with_capacity(1 + buf.len() + 1);
-                full_buf.push(b'\n');
-                full_buf.extend_from_slice(&buf);
-                if found_newline {
-                    full_buf.push(b'\n');
-                }
-                let chained = Cursor::new(full_buf).chain(stream_reader);
-                return Ok(DecryptedHeader {
-                    original_name: "decrypted_file".to_string(),
-                    payload: DecryptedPayload::Age(Box::new(chained)),
-                });
-            }
-        } else {
-            let chained = Cursor::new(vec![first_byte[0]]).chain(stream_reader);
-            return Ok(DecryptedHeader {
-                original_name: "decrypted_file".to_string(),
-                payload: DecryptedPayload::Age(Box::new(chained)),
-            });
-        }
-    }
+    let stream_reader = decryptor.decrypt(id_refs.into_iter())?;
+    let safe_reader = age_format::AgeStreamReader::new(stream_reader);
+    let (original_name, payload) = types::extract_metadata_from_stream(safe_reader);
 
     Ok(DecryptedHeader {
-        original_name: "decrypted_file".to_string(),
-        payload: DecryptedPayload::Age(Box::new(stream_reader)),
+        original_name,
+        payload,
     })
 }
 
@@ -249,10 +195,7 @@ mod tests {
         let bad_version_bytes = [0u8, 0u8, 0u8, 1u8, 0u8, 0u8];
         let cursor = Cursor::new(&bad_version_bytes);
         let res = decrypt_header(cursor, b"password");
-        assert!(matches!(
-            res,
-            Err(DecryptError::CorruptHeader("Unsupported file version") | DecryptError::CorruptHeader("Unsupported version"))
-        ));
+        assert!(matches!(res, Err(DecryptError::CorruptHeader(_))));
     }
 
     #[test]
@@ -394,5 +337,59 @@ mod tests {
         assert_eq!(extracted_ssh, vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host"]);
 
         let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_age_empty_file_and_exact_chunk_boundary() {
+        let key = age::x25519::Identity::generate();
+        let pubkey = key.to_public();
+        let creds = Credentials::new().with_identities(vec![Box::new(key)]);
+
+        // 1. Empty 0-byte payload
+        let mut encrypted_empty = Vec::new();
+        encrypt_stream_unified(
+            &mut Cursor::new(b""),
+            &mut encrypted_empty,
+            "empty.txt",
+            &EncryptionMethod::AgeRecipients(&[Box::new(pubkey.clone())]),
+        )
+        .expect("Encrypt empty failed");
+
+        let mut header = decrypt_header_with_credentials(Cursor::new(&encrypted_empty), &creds)
+            .expect("Decrypt empty header failed");
+        let mut out = Vec::new();
+        header.decrypt_payload(&mut out).expect("Decrypt empty payload failed");
+        assert_eq!(out, b"");
+
+        // 2. Exact 64KB (65536 bytes) payload
+        let payload_64k = vec![0xABu8; 64 * 1024];
+        let mut encrypted_64k = Vec::new();
+        encrypt_stream_unified(
+            &mut Cursor::new(&payload_64k),
+            &mut encrypted_64k,
+            "large.bin",
+            &EncryptionMethod::AgeRecipients(&[Box::new(pubkey.clone())]),
+        )
+        .expect("Encrypt 64k failed");
+
+        let mut header_64k = decrypt_header_with_credentials(Cursor::new(&encrypted_64k), &creds)
+            .expect("Decrypt 64k header failed");
+        let mut out_64k = Vec::new();
+        header_64k.decrypt_payload(&mut out_64k).expect("Decrypt 64k payload failed");
+        assert_eq!(out_64k, payload_64k);
+
+        // 3. Raw age-encrypted file without Valv metadata prefix
+        let raw_plaintext = b"recipients = [\"age1...\"]\n[vault]\n";
+        let encryptor = age::Encryptor::with_recipients(std::iter::once(&pubkey as &dyn age::Recipient)).unwrap();
+        let mut raw_encrypted = Vec::new();
+        let mut age_w = encryptor.wrap_output(&mut raw_encrypted).unwrap();
+        std::io::copy(&mut Cursor::new(raw_plaintext), &mut age_w).unwrap();
+        age_w.finish().unwrap();
+
+        let mut raw_header = decrypt_header_with_credentials(Cursor::new(&raw_encrypted), &creds)
+            .expect("Decrypt raw age header failed");
+        let mut raw_out = Vec::new();
+        raw_header.decrypt_payload(&mut raw_out).expect("Decrypt raw age payload failed");
+        assert_eq!(raw_out, raw_plaintext);
     }
 }

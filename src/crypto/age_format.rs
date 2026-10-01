@@ -1,8 +1,6 @@
 use std::io::{self, Read, Write};
 use std::path::PathBuf;
 
-use super::types::ValvMetadata;
-
 pub fn encrypt_stream_age_recipients<'b, R: Read, W: Write>(
     reader: &mut R,
     writer: &mut W,
@@ -12,21 +10,47 @@ pub fn encrypt_stream_age_recipients<'b, R: Read, W: Write>(
     let encryptor = age::Encryptor::with_recipients(recipients)
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e.to_string()))?;
     let mut age_writer = encryptor.wrap_output(writer)?;
-
-    let meta = serde_json::to_string(&ValvMetadata {
-        original_name: original_name.to_string(),
-    })
-    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-    let mut prefix_bytes = Vec::with_capacity(meta.len() + 2);
-    prefix_bytes.push(b'\n');
-    prefix_bytes.extend_from_slice(meta.as_bytes());
-    prefix_bytes.push(b'\n');
-
-    age_writer.write_all(&prefix_bytes)?;
+    super::types::write_metadata_prefix(&mut age_writer, original_name)?;
     io::copy(reader, &mut age_writer)?;
     age_writer.finish()?;
     Ok(())
+}
+
+pub struct AgeStreamReader<R> {
+    reader: R,
+    finished: bool,
+}
+
+impl<R: Read> AgeStreamReader<R> {
+    pub fn new(reader: R) -> Self {
+        Self {
+            reader,
+            finished: false,
+        }
+    }
+}
+
+impl<R: Read> Read for AgeStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        if self.finished {
+            return Ok(0);
+        }
+        match self.reader.read(buf) {
+            Ok(0) => {
+                self.finished = true;
+                Ok(0)
+            }
+            Ok(n) => Ok(n),
+            Err(e) => {
+                if e.to_string().contains("last chunk has been processed") {
+                    self.finished = true;
+                    Ok(0)
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
 }
 
 pub fn encrypt_stream_age_passphrase<R: Read, W: Write>(
@@ -38,18 +62,7 @@ pub fn encrypt_stream_age_passphrase<R: Read, W: Write>(
     let secret = age::secrecy::SecretString::from(passphrase.to_string());
     let encryptor = age::Encryptor::with_user_passphrase(secret);
     let mut age_writer = encryptor.wrap_output(writer)?;
-
-    let meta = serde_json::to_string(&ValvMetadata {
-        original_name: original_name.to_string(),
-    })
-    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-    let mut prefix_bytes = Vec::with_capacity(meta.len() + 2);
-    prefix_bytes.push(b'\n');
-    prefix_bytes.extend_from_slice(meta.as_bytes());
-    prefix_bytes.push(b'\n');
-
-    age_writer.write_all(&prefix_bytes)?;
+    super::types::write_metadata_prefix(&mut age_writer, original_name)?;
     io::copy(reader, &mut age_writer)?;
     age_writer.finish()?;
     Ok(())

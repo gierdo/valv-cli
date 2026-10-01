@@ -1,5 +1,5 @@
 use std::fs::File;
-use std::io::{self, BufReader, Cursor, Read, Write};
+use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 
 use chacha20::cipher::{KeyIvInit, StreamCipher};
@@ -10,8 +10,8 @@ use sha2::Sha512;
 use subtle::ConstantTimeEq;
 
 use super::types::{
-    zeroize, DecryptError, DecryptedHeader, DecryptedPayload, ValvMetadata, BUFFER_SIZE,
-    CHECK_LEN, IV_LEN, MAX_ITERATIONS, MIN_ITERATIONS, SALT_LEN, VALV_V2,
+    zeroize, DecryptError, DecryptedHeader, BUFFER_SIZE, CHECK_LEN, IV_LEN, MAX_ITERATIONS,
+    MIN_ITERATIONS, SALT_LEN, VALV_V2,
 };
 
 pub fn derive_key(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {
@@ -77,20 +77,27 @@ pub fn encrypt_stream<R: Read, W: Write>(
     cipher.apply_keystream(&mut encrypted_check);
     writer.write_all(&encrypted_check)?;
 
-    let meta = serde_json::to_string(&ValvMetadata {
-        original_name: original_name.to_string(),
-    })
-    .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-
-    let mut prefix_bytes = Vec::with_capacity(meta.len() + 2);
-    prefix_bytes.push(b'\n');
-    prefix_bytes.extend_from_slice(meta.as_bytes());
-    prefix_bytes.push(b'\n');
-
+    let mut prefix_bytes = Vec::new();
+    super::types::write_metadata_prefix(&mut prefix_bytes, original_name)?;
     cipher.apply_keystream(&mut prefix_bytes);
     writer.write_all(&prefix_bytes)?;
 
     transform_stream(&mut cipher, reader, writer)
+}
+
+pub struct ValvStreamReader<R> {
+    pub cipher: ChaCha20,
+    pub reader: R,
+}
+
+impl<R: Read> Read for ValvStreamReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.reader.read(buf)?;
+        if n > 0 {
+            self.cipher.apply_keystream(&mut buf[..n]);
+        }
+        Ok(n)
+    }
 }
 
 pub fn decrypt_valv_v2_header<'a, R: Read + Send + 'a>(
@@ -132,62 +139,12 @@ pub fn decrypt_valv_v2_header<'a, R: Read + Send + 'a>(
         return Err(DecryptError::InvalidPassword);
     }
 
-    let mut first_byte = [0u8; 1];
-    reader.read_exact(&mut first_byte)?;
-    cipher.apply_keystream(&mut first_byte);
-
-    if first_byte[0] != b'\n' {
-        let chained = Cursor::new(vec![first_byte[0]]).chain(reader);
-        return Ok(DecryptedHeader {
-            original_name: "decrypted_file".to_string(),
-            payload: DecryptedPayload::Valv {
-                cipher,
-                reader: Box::new(chained),
-            },
-        });
-    }
-
-    let mut buf = Vec::new();
-    let mut byte = [0u8; 1];
-    let mut found_newline = false;
-
-    while buf.len() < 4096 {
-        reader.read_exact(&mut byte)?;
-        cipher.apply_keystream(&mut byte);
-        if byte[0] == b'\n' {
-            found_newline = true;
-            break;
-        }
-        buf.push(byte[0]);
-    }
-
-    if found_newline
-        && let Ok(meta_str) = std::str::from_utf8(&buf)
-        && let Ok(meta) = serde_json::from_str::<ValvMetadata>(meta_str)
-    {
-        return Ok(DecryptedHeader {
-            original_name: meta.original_name,
-            payload: DecryptedPayload::Valv {
-                cipher,
-                reader: Box::new(reader),
-            },
-        });
-    }
-
-    let mut full_buf = Vec::with_capacity(1 + buf.len() + 1);
-    full_buf.push(b'\n');
-    full_buf.extend_from_slice(&buf);
-    if found_newline {
-        full_buf.push(b'\n');
-    }
-    let chained = Cursor::new(full_buf).chain(reader);
+    let valv_reader = ValvStreamReader { cipher, reader };
+    let (original_name, payload) = super::types::extract_metadata_from_stream(valv_reader);
 
     Ok(DecryptedHeader {
-        original_name: "decrypted_file".to_string(),
-        payload: DecryptedPayload::Valv {
-            cipher,
-            reader: Box::new(chained),
-        },
+        original_name,
+        payload,
     })
 }
 
