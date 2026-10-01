@@ -5,6 +5,7 @@ use std::process::ExitCode;
 
 use valv::ValvError;
 use valv::cli::{CliArgs, Mode, print_help, read_password};
+use valv::config::{AgeVaultManifest, ValvConfig};
 use valv::crypto::{
     BUFFER_SIZE, Credentials, DEFAULT_ITERATIONS, DecryptError, EncryptionMethod, VaultFormat,
     decrypt_file_with_credentials_to, decrypt_header_with_credentials, encrypt_stream_unified,
@@ -15,7 +16,7 @@ use valv::vault::{
     generate_random_filename, get_mount_dir, get_suffix_for_path_and_format,
     get_thumbnail_valv_name, is_thumbnail_valv_file, is_valv_file, list_mounts,
     mount_vault_with_credentials, run_sync_daemon_with_credentials, sanitize_filename,
-    unmount_vault,
+    save_encrypted_manifest, unmount_vault,
 };
 
 fn resolve_output_path(
@@ -58,7 +59,7 @@ fn resolve_output_path(
     }
 }
 
-fn run_encrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), ValvError> {
+fn run_encrypt(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<(), ValvError> {
     if files.is_empty() {
         print_help();
         return Err(ValvError::Message(
@@ -67,10 +68,26 @@ fn run_encrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), ValvError> {
         ));
     }
 
-    let recipients = load_recipients(&cli.recipients, &cli.recipients_files)
+    let manifest_in_dir = if files.len() == 1 && files[0].is_dir() {
+        AgeVaultManifest::load_from_dir(&files[0]).ok().flatten()
+    } else if let Some(ref out) = cli.output && out.is_dir() {
+        AgeVaultManifest::load_from_dir(out).ok().flatten()
+    } else {
+        None
+    };
+
+    let (recipient_strs, recipient_file_paths) = if !cli.recipients.is_empty() || !cli.recipients_files.is_empty() {
+        (cli.recipients.clone(), cli.recipients_files.clone())
+    } else if let Some((ref manifest, _)) = manifest_in_dir {
+        (manifest.recipients.clone(), manifest.recipients_files.clone())
+    } else {
+        (config.resolve_recipients(&cli.recipients), config.resolve_recipients_files(&cli.recipients_files))
+    };
+
+    let recipients = load_recipients(&recipient_strs, &recipient_file_paths)
         .map_err(|e| ValvError::Message(e.to_string(), 1))?;
 
-    let format = if !recipients.is_empty() || cli.age {
+    let format = if !recipients.is_empty() || cli.age || manifest_in_dir.is_some() {
         VaultFormat::Age
     } else {
         VaultFormat::Valv
@@ -208,6 +225,31 @@ fn run_encrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), ValvError> {
                 }
             }
         }
+
+        if let Some((_, ref manifest_path)) = manifest_in_dir {
+            let target_vault_dir = if let Some(ref out) = cli.output {
+                if out.is_dir() || files.len() > 1 {
+                    out.clone()
+                } else {
+                    out.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
+                }
+            } else if files.len() == 1 && files[0].is_dir() {
+                files[0].clone()
+            } else {
+                PathBuf::from(".")
+            };
+
+            let creds = Credentials::new();
+            let _ = save_encrypted_manifest(
+                manifest_path,
+                &target_vault_dir,
+                format,
+                &recipients,
+                &creds,
+                iterations,
+            );
+        }
+
         Ok(())
     })();
 
@@ -217,7 +259,7 @@ fn run_encrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), ValvError> {
     res
 }
 
-fn run_decrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), ValvError> {
+fn run_decrypt(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<(), ValvError> {
     if files.is_empty() {
         print_help();
         return Err(ValvError::Message(
@@ -226,7 +268,8 @@ fn run_decrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), ValvError> {
         ));
     }
 
-    let identities = load_identities(&cli.identities)
+    let identity_paths = config.resolve_identities(&cli.identities);
+    let identities = load_identities(&identity_paths)
         .map_err(|e| ValvError::Message(e.to_string(), 1))?;
 
     let mut password = if identities.is_empty()
@@ -435,166 +478,201 @@ fn run_decrypt(cli: &CliArgs, files: &[PathBuf]) -> Result<(), ValvError> {
     res
 }
 
+fn run_mount(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<(), ValvError> {
+    let vault_dir = files.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+    if !vault_dir.is_dir() {
+        return Err(ValvError::Message(
+            format!("Not a directory: {}", vault_dir.display()),
+            1,
+        ));
+    }
+
+    let identity_paths = config.resolve_identities(&cli.identities);
+    let identities = load_identities(&identity_paths)
+        .map_err(|e| ValvError::Message(e.to_string(), 1))?;
+
+    let mut password = if identities.is_empty()
+        || cli.password.is_some()
+        || cli.stdin_password
+    {
+        let pwd = read_password(cli)
+            .map_err(|e| ValvError::Message(format!("Failed to read password: {}", e), 1))?
+            .into_bytes();
+        if pwd.is_empty() && identities.is_empty() {
+            return Err(ValvError::Message(
+                "Password or identity required to mount vault.".to_string(),
+                1,
+            ));
+        }
+        Some(pwd)
+    } else {
+        None
+    };
+
+    let mut credentials = Credentials::new().with_identities(identities);
+    if let Some(ref pwd) = password {
+        credentials.password = Some(pwd.clone());
+    }
+
+    let vault_manifest = match AgeVaultManifest::load_from_dir_with_credentials(&vault_dir, &credentials) {
+        Ok(opt) => opt,
+        Err(err) => {
+            return Err(ValvError::Message(
+                format!("Cannot mount vault: failed to decrypt manifest: {}", err),
+                1,
+            ));
+        }
+    };
+    let has_manifest = vault_manifest.is_some();
+
+    let (recipient_strs, recipient_file_paths) = if !cli.recipients.is_empty() || !cli.recipients_files.is_empty() {
+        (cli.recipients.clone(), cli.recipients_files.clone())
+    } else if let Some((ref manifest, _, _)) = vault_manifest {
+        (manifest.recipients.clone(), manifest.recipients_files.clone())
+    } else {
+        (config.resolve_recipients(&cli.recipients), config.resolve_recipients_files(&cli.recipients_files))
+    };
+
+    let recipients = load_recipients(&recipient_strs, &recipient_file_paths)
+        .map_err(|e| ValvError::Message(e.to_string(), 1))?;
+
+    let watch_pid = if cli.no_watch {
+        None
+    } else {
+        cli.watch_pid.or_else(|| {
+            #[cfg(unix)]
+            {
+                Some(std::os::unix::process::parent_id())
+            }
+            #[cfg(not(unix))]
+            {
+                None
+            }
+        })
+    };
+    let mount_dir = get_mount_dir(&vault_dir, watch_pid, cli.output.as_deref());
+    let iterations = cli.iterations.unwrap_or(DEFAULT_ITERATIONS);
+    let format = if cli.age || !recipients.is_empty() || has_manifest {
+        VaultFormat::Age
+    } else {
+        VaultFormat::Valv
+    };
+
+    let res = mount_vault_with_credentials(
+        &vault_dir,
+        &mount_dir,
+        &credentials,
+        watch_pid,
+        cli.foreground,
+        iterations,
+        format,
+        &recipients,
+        &identity_paths,
+        &recipient_strs,
+    );
+    if let Some(ref mut pwd) = password {
+        valv::crypto::zeroize(pwd);
+    }
+    if let Some(ref mut pwd) = credentials.password {
+        valv::crypto::zeroize(pwd);
+    }
+    res
+}
+
+fn run_unmount(files: &[PathBuf]) -> Result<(), ValvError> {
+    let target = files.first().cloned().unwrap_or_else(|| PathBuf::from("."));
+    unmount_vault(&target)
+}
+
+fn run_mounts() {
+    let mounts = list_mounts();
+    if mounts.is_empty() {
+        println!("No active Valv mounts found.");
+    } else {
+        for m in mounts {
+            let watch_info = match m.watch_pid {
+                Some(w) => format!("daemon PID: {}, watch PID: {}", m.daemon_pid, w),
+                None => format!("daemon PID: {}", m.daemon_pid),
+            };
+            println!(
+                "{} -> {} ({} files, {})",
+                m.mount_dir.display(),
+                m.vault_dir.display(),
+                m.file_count,
+                watch_info
+            );
+        }
+    }
+}
+
+fn run_sync_daemon(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<(), ValvError> {
+    if files.len() < 2 {
+        return Err(ValvError::Message(
+            "sync-daemon requires <vault_dir> <mount_dir>".to_string(),
+            1,
+        ));
+    }
+    let vault_dir = &files[0];
+    let mount_dir = &files[1];
+
+    let identity_paths = config.resolve_identities(&cli.identities);
+    let recipient_strs = config.resolve_recipients(&cli.recipients);
+    let recipient_file_paths = config.resolve_recipients_files(&cli.recipients_files);
+
+    let identities = load_identities(&identity_paths)
+        .map_err(|e| ValvError::Message(e.to_string(), 1))?;
+    let recipients = load_recipients(&recipient_strs, &recipient_file_paths)
+        .map_err(|e| ValvError::Message(e.to_string(), 1))?;
+
+    let mut password_str = String::new();
+    let _ = io::stdin().read_line(&mut password_str);
+    let mut password = password_str
+        .trim_end_matches(&['\r', '\n'][..])
+        .as_bytes()
+        .to_vec();
+    valv::crypto::zeroize(unsafe { password_str.as_bytes_mut() });
+
+    let mut credentials = Credentials::new().with_identities(identities);
+    if !password.is_empty() {
+        credentials.password = Some(password.clone());
+    }
+
+    let iterations = cli.iterations.unwrap_or(DEFAULT_ITERATIONS);
+    let format = if cli.age || !recipients.is_empty() {
+        VaultFormat::Age
+    } else {
+        VaultFormat::Valv
+    };
+
+    let res = run_sync_daemon_with_credentials(
+        vault_dir,
+        mount_dir,
+        &credentials,
+        cli.watch_pid,
+        iterations,
+        format,
+        &recipients,
+    );
+    valv::crypto::zeroize(&mut password);
+    if let Some(ref mut pwd) = credentials.password {
+        valv::crypto::zeroize(pwd);
+    }
+    res
+}
+
 fn run() -> Result<(), ValvError> {
     let cli = CliArgs::parse();
+    let config = ValvConfig::load(cli.config.as_deref())
+        .map_err(|e| ValvError::Message(e, 1))?;
     let (mode, files) = cli.resolve_mode_and_files(is_valv_file);
 
     match mode {
-        Mode::Mount => {
-            let vault_dir = files.first().cloned().unwrap_or_else(|| PathBuf::from("."));
-            if !vault_dir.is_dir() {
-                return Err(ValvError::Message(
-                    format!("Not a directory: {}", vault_dir.display()),
-                    1,
-                ));
-            }
-
-            let identities = load_identities(&cli.identities)
-                .map_err(|e| ValvError::Message(e.to_string(), 1))?;
-            let recipients = load_recipients(&cli.recipients, &cli.recipients_files)
-                .map_err(|e| ValvError::Message(e.to_string(), 1))?;
-
-            let mut password = if identities.is_empty()
-                || cli.password.is_some()
-                || cli.stdin_password
-            {
-                let pwd = read_password(&cli)
-                    .map_err(|e| ValvError::Message(format!("Failed to read password: {}", e), 1))?
-                    .into_bytes();
-                if pwd.is_empty() && identities.is_empty() {
-                    return Err(ValvError::Message(
-                        "Password or identity required to mount vault.".to_string(),
-                        1,
-                    ));
-                }
-                Some(pwd)
-            } else {
-                None
-            };
-
-            let mut credentials = Credentials::new().with_identities(identities);
-            if let Some(ref pwd) = password {
-                credentials.password = Some(pwd.clone());
-            }
-
-            let watch_pid = if cli.no_watch {
-                None
-            } else {
-                cli.watch_pid.or_else(|| {
-                    #[cfg(unix)]
-                    {
-                        Some(std::os::unix::process::parent_id())
-                    }
-                    #[cfg(not(unix))]
-                    {
-                        None
-                    }
-                })
-            };
-            let mount_dir = get_mount_dir(&vault_dir, watch_pid, cli.output.as_deref());
-            let iterations = cli.iterations.unwrap_or(DEFAULT_ITERATIONS);
-            let format = if cli.age || !recipients.is_empty() {
-                VaultFormat::Age
-            } else {
-                VaultFormat::Valv
-            };
-
-            let res = mount_vault_with_credentials(
-                &vault_dir,
-                &mount_dir,
-                &credentials,
-                watch_pid,
-                cli.foreground,
-                iterations,
-                format,
-                &recipients,
-                &cli.identities,
-                &cli.recipients,
-            );
-            if let Some(ref mut pwd) = password {
-                valv::crypto::zeroize(pwd);
-            }
-            if let Some(ref mut pwd) = credentials.password {
-                valv::crypto::zeroize(pwd);
-            }
-            res?;
-        }
-        Mode::Unmount => {
-            let target = files.first().cloned().unwrap_or_else(|| PathBuf::from("."));
-            unmount_vault(&target)?;
-        }
-        Mode::Mounts => {
-            let mounts = list_mounts();
-            if mounts.is_empty() {
-                println!("No active Valv mounts found.");
-            } else {
-                for m in mounts {
-                    let watch_info = match m.watch_pid {
-                        Some(w) => format!("daemon PID: {}, watch PID: {}", m.daemon_pid, w),
-                        None => format!("daemon PID: {}", m.daemon_pid),
-                    };
-                    println!(
-                        "{} -> {} ({} files, {})",
-                        m.mount_dir.display(),
-                        m.vault_dir.display(),
-                        m.file_count,
-                        watch_info
-                    );
-                }
-            }
-        }
-        Mode::SyncDaemon => {
-            if files.len() < 2 {
-                return Err(ValvError::Message(
-                    "sync-daemon requires <vault_dir> <mount_dir>".to_string(),
-                    1,
-                ));
-            }
-            let vault_dir = &files[0];
-            let mount_dir = &files[1];
-
-            let identities = load_identities(&cli.identities)
-                .map_err(|e| ValvError::Message(e.to_string(), 1))?;
-            let recipients = load_recipients(&cli.recipients, &cli.recipients_files)
-                .map_err(|e| ValvError::Message(e.to_string(), 1))?;
-
-            let mut password_str = String::new();
-            let _ = io::stdin().read_line(&mut password_str);
-            let mut password = password_str
-                .trim_end_matches(&['\r', '\n'][..])
-                .as_bytes()
-                .to_vec();
-            valv::crypto::zeroize(unsafe { password_str.as_bytes_mut() });
-
-            let mut credentials = Credentials::new().with_identities(identities);
-            if !password.is_empty() {
-                credentials.password = Some(password.clone());
-            }
-
-            let iterations = cli.iterations.unwrap_or(DEFAULT_ITERATIONS);
-            let format = if cli.age || !recipients.is_empty() {
-                VaultFormat::Age
-            } else {
-                VaultFormat::Valv
-            };
-
-            let res = run_sync_daemon_with_credentials(
-                vault_dir,
-                mount_dir,
-                &credentials,
-                cli.watch_pid,
-                iterations,
-                format,
-                &recipients,
-            );
-            valv::crypto::zeroize(&mut password);
-            if let Some(ref mut pwd) = credentials.password {
-                valv::crypto::zeroize(pwd);
-            }
-            res?;
-        }
-        Mode::Encrypt => run_encrypt(&cli, &files)?,
-        Mode::Decrypt => run_decrypt(&cli, &files)?,
+        Mode::Mount => run_mount(&cli, &config, &files)?,
+        Mode::Unmount => run_unmount(&files)?,
+        Mode::Mounts => run_mounts(),
+        Mode::SyncDaemon => run_sync_daemon(&cli, &config, &files)?,
+        Mode::Encrypt => run_encrypt(&cli, &config, &files)?,
+        Mode::Decrypt => run_decrypt(&cli, &config, &files)?,
     }
 
     Ok(())
@@ -686,7 +764,7 @@ mod tests {
         let cli_enc = CliArgs::try_parse_from(enc_args).unwrap();
         let (mode, files) = cli_enc.resolve_mode_and_files(is_valv_file);
         assert_eq!(mode, Mode::Encrypt);
-        run_encrypt(&cli_enc, &files).expect("CLI encrypt with age pubkey should succeed");
+        run_encrypt(&cli_enc, &ValvConfig::default(), &files).expect("CLI encrypt with age pubkey should succeed");
 
         // Find created encrypted file
         let mut enc_files = Vec::new();
@@ -715,7 +793,7 @@ mod tests {
         let cli_dec = CliArgs::try_parse_from(dec_args).unwrap();
         let (mode_dec, files_dec) = cli_dec.resolve_mode_and_files(is_valv_file);
         assert_eq!(mode_dec, Mode::Decrypt);
-        run_decrypt(&cli_dec, &files_dec).expect("CLI decrypt with age key should succeed");
+        run_decrypt(&cli_dec, &ValvConfig::default(), &files_dec).expect("CLI decrypt with age key should succeed");
 
         let decrypted_content = fs::read_to_string(dec_dir.join("cli_secret.txt")).unwrap();
         assert_eq!(decrypted_content, "secret text content");
@@ -750,7 +828,7 @@ mod tests {
         let cli_enc = CliArgs::try_parse_from(enc_args).unwrap();
         let (mode, files) = cli_enc.resolve_mode_and_files(is_valv_file);
         assert_eq!(mode, Mode::Encrypt);
-        run_encrypt(&cli_enc, &files).expect("Encrypting directory should succeed");
+        run_encrypt(&cli_enc, &ValvConfig::default(), &files).expect("Encrypting directory should succeed");
 
         let vault_files = collect_vault_files(&vault_dir);
         assert_eq!(vault_files.len(), 2);
@@ -768,7 +846,7 @@ mod tests {
         let cli_dec = CliArgs::try_parse_from(dec_args).unwrap();
         let (mode_dec, files_dec) = cli_dec.resolve_mode_and_files(is_valv_file);
         assert_eq!(mode_dec, Mode::Decrypt);
-        run_decrypt(&cli_dec, &files_dec).expect("Decrypting directory should succeed");
+        run_decrypt(&cli_dec, &ValvConfig::default(), &files_dec).expect("Decrypting directory should succeed");
 
         assert_eq!(
             fs::read_to_string(dec_dir.join("root.txt")).unwrap(),
@@ -807,7 +885,7 @@ mod tests {
         ];
         let cli_enc = CliArgs::try_parse_from(enc_args).unwrap();
         let (_mode, files) = cli_enc.resolve_mode_and_files(is_valv_file);
-        run_encrypt(&cli_enc, &files).unwrap();
+        run_encrypt(&cli_enc, &ValvConfig::default(), &files).unwrap();
 
         // Inject corrupt .valv file
         let corrupt_dir = vault_dir.join("nested");
@@ -826,7 +904,7 @@ mod tests {
         let cli_dec = CliArgs::try_parse_from(dec_args).unwrap();
         let (_mode_dec, files_dec) = cli_dec.resolve_mode_and_files(is_valv_file);
         // Decrypt should skip corrupt file gracefully and not fail overall
-        run_decrypt(&cli_dec, &files_dec).expect("Directory decrypt with corrupt file should succeed for valid files");
+        run_decrypt(&cli_dec, &ValvConfig::default(), &files_dec).expect("Directory decrypt with corrupt file should succeed for valid files");
 
         assert_eq!(
             fs::read_to_string(dec_dir.join("valid1.txt")).unwrap(),
@@ -835,6 +913,74 @@ mod tests {
         assert_eq!(
             fs::read_to_string(dec_dir.join("nested").join("valid2.txt")).unwrap(),
             "valid 2"
+        );
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_age_config_file_identity_resolution() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("valv_cfg_test_{}", rand::random::<u32>()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let key = age::x25519::Identity::generate();
+        let pubkey = key.to_public().to_string();
+        let key_file = temp_dir.join("my_age_key.txt");
+        fs::write(&key_file, key.to_string().expose_secret().as_bytes()).unwrap();
+
+        let config_file = temp_dir.join("config.toml");
+        let config_toml = format!(
+            "[age]\nidentity = \"{}\"\nrecipients = [\"{}\"]\n",
+            key_file.display(),
+            pubkey
+        );
+        fs::write(&config_file, config_toml).unwrap();
+
+        let config = ValvConfig::load_from_path(&config_file).unwrap();
+
+        let src_file = temp_dir.join("doc.txt");
+        fs::write(&src_file, b"configured age encryption").unwrap();
+
+        // Encrypt using recipients from config (no -r or -p given)
+        let enc_args = vec![
+            "valv",
+            "encrypt",
+            "--age",
+            "-o",
+            temp_dir.to_str().unwrap(),
+            src_file.to_str().unwrap(),
+        ];
+        let cli_enc = CliArgs::try_parse_from(enc_args).unwrap();
+        let (_mode_enc, files_enc) = cli_enc.resolve_mode_and_files(is_valv_file);
+        run_encrypt(&cli_enc, &config, &files_enc).expect("Encrypt with configured recipient should succeed");
+
+        let mut enc_files = Vec::new();
+        for entry in fs::read_dir(&temp_dir).unwrap().flatten() {
+            let p = entry.path();
+            if is_valv_file(&p) && !is_thumbnail_valv_file(&p) {
+                enc_files.push(p);
+            }
+        }
+        assert_eq!(enc_files.len(), 1);
+
+        // Decrypt using identity from config (no -k or -p given)
+        let dec_dir = temp_dir.join("decrypted");
+        fs::create_dir_all(&dec_dir).unwrap();
+        let dec_args = vec![
+            "valv",
+            "decrypt",
+            "-o",
+            dec_dir.to_str().unwrap(),
+            enc_files[0].to_str().unwrap(),
+        ];
+        let cli_dec = CliArgs::try_parse_from(dec_args).unwrap();
+        let (_mode_dec, files_dec) = cli_dec.resolve_mode_and_files(is_valv_file);
+        run_decrypt(&cli_dec, &config, &files_dec).expect("Decrypt with configured identity should succeed");
+
+        assert_eq!(
+            fs::read_to_string(dec_dir.join("doc.txt")).unwrap(),
+            "configured age encryption"
         );
 
         let _ = fs::remove_dir_all(&temp_dir);

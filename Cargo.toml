@@ -16,3 +16,4 @@ clap = { version = "4.6.7", features = ["derive"] }
 age = { version = "0.12.1", features = ["armor", "ssh", "plugin", "cli-common"] }
 subtle = "2.6.1"
 zeroize = { version = "1.8.1", features = ["derive"] }
+toml = "1.1.6"

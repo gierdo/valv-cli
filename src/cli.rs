@@ -84,6 +84,10 @@ pub struct CliArgs {
     /// Stream decrypted content to standard output
     #[arg(long = "stdout", global = true)]
     pub to_stdout: bool,
+
+    /// Path to configuration file
+    #[arg(short = 'c', long = "config", global = true)]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug, Clone, PartialEq, Eq)]
