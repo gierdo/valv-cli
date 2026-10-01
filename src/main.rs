@@ -76,13 +76,25 @@ fn run_encrypt(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<
         None
     };
 
-    let (recipient_strs, recipient_file_paths) = if !cli.recipients.is_empty() || !cli.recipients_files.is_empty() {
+    let (mut recipient_strs, recipient_file_paths) = if !cli.recipients.is_empty() || !cli.recipients_files.is_empty() {
         (cli.recipients.clone(), cli.recipients_files.clone())
     } else if let Some((ref manifest, _)) = manifest_in_dir {
-        (manifest.recipients.clone(), manifest.recipients_files.clone())
+        manifest.resolve_recipients()
     } else {
         (config.resolve_recipients(&cli.recipients), config.resolve_recipients_files(&cli.recipients_files))
     };
+
+    if recipient_strs.is_empty() && recipient_file_paths.is_empty() {
+        let identity_paths = config.resolve_identities(&cli.identities);
+        for id_path in &identity_paths {
+            let derived = extract_recipients_from_identity_file(id_path);
+            for d in derived {
+                if !recipient_strs.contains(&d) {
+                    recipient_strs.push(d);
+                }
+            }
+        }
+    }
 
     let recipients = load_recipients(&recipient_strs, &recipient_file_paths)
         .map_err(|e| ValvError::Message(e.to_string(), 1))?;
@@ -252,6 +264,7 @@ fn run_encrypt(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<
             let manifest = AgeVaultManifest {
                 recipients: recipient_strs.clone(),
                 recipients_files: recipient_file_paths.clone(),
+                ..Default::default()
             };
             let creds = Credentials::new();
             let _ = create_encrypted_manifest(
@@ -560,6 +573,7 @@ fn run_init(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<(),
     let manifest = AgeVaultManifest {
         recipients: recipient_strs.clone(),
         recipients_files: recipient_file_paths,
+        ..Default::default()
     };
 
     let iterations = cli.iterations.unwrap_or(DEFAULT_ITERATIONS);
@@ -644,13 +658,24 @@ fn run_mount(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<()
     };
     let has_manifest = vault_manifest.is_some();
 
-    let (recipient_strs, recipient_file_paths) = if !cli.recipients.is_empty() || !cli.recipients_files.is_empty() {
+    let (mut recipient_strs, recipient_file_paths) = if !cli.recipients.is_empty() || !cli.recipients_files.is_empty() {
         (cli.recipients.clone(), cli.recipients_files.clone())
     } else if let Some((ref manifest, _, _)) = vault_manifest {
-        (manifest.recipients.clone(), manifest.recipients_files.clone())
+        manifest.resolve_recipients()
     } else {
         (config.resolve_recipients(&cli.recipients), config.resolve_recipients_files(&cli.recipients_files))
     };
+
+    if recipient_strs.is_empty() && recipient_file_paths.is_empty() {
+        for id_path in &identity_paths {
+            let derived = extract_recipients_from_identity_file(id_path);
+            for d in derived {
+                if !recipient_strs.contains(&d) {
+                    recipient_strs.push(d);
+                }
+            }
+        }
+    }
 
     let recipients = load_recipients(&recipient_strs, &recipient_file_paths)
         .map_err(|e| ValvError::Message(e.to_string(), 1))?;
@@ -735,21 +760,48 @@ fn run_sync_daemon(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Res
     let mount_dir = &files[1];
 
     let identity_paths = config.resolve_identities(&cli.identities);
-    let recipient_strs = config.resolve_recipients(&cli.recipients);
-    let recipient_file_paths = config.resolve_recipients_files(&cli.recipients_files);
+    let (mut recipient_strs, recipient_file_paths) = (
+        config.resolve_recipients(&cli.recipients),
+        config.resolve_recipients_files(&cli.recipients_files),
+    );
+
+    if recipient_strs.is_empty() && recipient_file_paths.is_empty() {
+        for id_path in &identity_paths {
+            let derived = extract_recipients_from_identity_file(id_path);
+            for d in derived {
+                if !recipient_strs.contains(&d) {
+                    recipient_strs.push(d);
+                }
+            }
+        }
+    }
+
+    if recipient_strs.is_empty() && recipient_file_paths.is_empty() {
+        if let Some(mount_manifest) = AgeVaultManifest::find_in_dir(mount_dir)
+            && let Ok((manifest, _)) = AgeVaultManifest::load_from_file_with_credentials(&mount_manifest, &Credentials::new())
+        {
+            let (r_strs, _) = manifest.resolve_recipients();
+            recipient_strs = r_strs;
+        }
+    }
 
     let identities = load_identities(&identity_paths)
         .map_err(|e| ValvError::Message(e.to_string(), 1))?;
     let recipients = load_recipients(&recipient_strs, &recipient_file_paths)
         .map_err(|e| ValvError::Message(e.to_string(), 1))?;
 
-    let mut password_str = String::new();
-    let _ = io::stdin().read_line(&mut password_str);
-    let mut password = password_str
-        .trim_end_matches(&['\r', '\n'][..])
-        .as_bytes()
-        .to_vec();
-    valv::crypto::zeroize(unsafe { password_str.as_bytes_mut() });
+    let mut password = if cli.stdin_password {
+        let mut password_str = String::new();
+        let _ = io::stdin().read_line(&mut password_str);
+        let pwd = password_str
+            .trim_end_matches(&['\r', '\n'][..])
+            .as_bytes()
+            .to_vec();
+        valv::crypto::zeroize(unsafe { password_str.as_bytes_mut() });
+        pwd
+    } else {
+        Vec::new()
+    };
 
     let mut credentials = Credentials::new().with_identities(identities);
     if !password.is_empty() {

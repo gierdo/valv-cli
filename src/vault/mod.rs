@@ -533,6 +533,141 @@ mod tests {
     }
 
     #[test]
+    fn test_age_vault_manifest_identity_reencryption() {
+        use age::secrecy::ExposeSecret;
+        let temp_dir = std::env::temp_dir().join(format!("valv_manifest_id_reenc_{}", rand::rng().random::<u32>()));
+        let vault_dir = temp_dir.join("vault");
+        let mount_dir = temp_dir.join("mount");
+        fs::create_dir_all(&vault_dir).unwrap();
+
+        let key1 = age::x25519::Identity::generate();
+        let pubkey1 = key1.to_public();
+
+        let key2 = age::x25519::Identity::generate();
+        let pubkey2 = key2.to_public();
+
+        let key2_file = temp_dir.join("key2.txt");
+        fs::write(&key2_file, format!("# public key: {}\n{}\n", pubkey2, key2.to_string().expose_secret())).unwrap();
+
+        let manifest_content = format!("recipients = [\"{}\"]\n", pubkey1);
+        fs::write(vault_dir.join(".age_vault.toml"), manifest_content).unwrap();
+
+        let file_path = vault_dir.join("secret-x.age");
+        let mut out = BufWriter::new(File::create(&file_path).unwrap());
+        let recips1 = vec![Box::new(pubkey1.clone()) as Box<dyn age::Recipient + Send>];
+        encrypt_stream_unified(
+            &mut Cursor::new(b"Top Secret With Identity"),
+            &mut out,
+            "secret.txt",
+            &EncryptionMethod::AgeRecipients(&recips1),
+        )
+        .unwrap();
+        drop(out);
+
+        let creds2 = Credentials::new().with_identities(vec![Box::new(key2.clone())]);
+        let mut check_fail = Vec::new();
+        assert!(crate::crypto::decrypt_file_with_credentials_to(&file_path, &creds2, &mut check_fail).is_err());
+
+        let v_dir = vault_dir.clone();
+        let m_dir = mount_dir.clone();
+        let key1_clone = key1.clone();
+        let r1 = vec![Box::new(pubkey1.clone()) as Box<dyn age::Recipient + Send>];
+        let p1_str = pubkey1.to_string();
+
+        let daemon_handle = thread::spawn(move || {
+            let c1 = Credentials::new().with_identities(vec![Box::new(key1_clone)]);
+            mount_vault_with_credentials(
+                &v_dir,
+                &m_dir,
+                &c1,
+                None,
+                true,
+                1000,
+                VaultFormat::Age,
+                &r1,
+                &[],
+                &[p1_str],
+            )
+        });
+
+        for _ in 0..50 {
+            if mount_dir.join("secret.txt").exists() && mount_dir.join(".age_vault.toml").exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        assert!(mount_dir.join("secret.txt").exists());
+        assert!(mount_dir.join(".age_vault.toml").exists());
+
+        // Update manifest with identity file for key2 and existing recipient for key1
+        let updated_manifest = format!(
+            "recipients = [\"{}\"]\nidentity = \"{}\"\n",
+            pubkey1,
+            key2_file.display()
+        );
+        fs::write(mount_dir.join(".age_vault.toml"), updated_manifest).unwrap();
+
+        thread::sleep(Duration::from_millis(1500));
+
+        unmount_vault(&mount_dir).expect("Unmount should succeed");
+        daemon_handle.join().expect("Daemon thread joined").expect("Daemon run succeeded");
+
+        assert!(vault_dir.join(".age_vault.toml.age").exists());
+        assert!(!vault_dir.join(".age_vault.toml").exists());
+
+        let mut check_success = Vec::new();
+        let orig_name = crate::crypto::decrypt_file_with_credentials_to(&file_path, &creds2, &mut check_success)
+            .expect("Decryption by newly added identity should succeed after re-encryption");
+        assert_eq!(orig_name, "secret.txt");
+        assert_eq!(check_success, b"Top Secret With Identity");
+
+        let (decrypted_manifest, _, decrypted_content) = crate::config::AgeVaultManifest::load_from_dir_with_credentials(&vault_dir, &creds2)
+            .unwrap()
+            .expect("Manifest should decrypt with key2");
+        let (resolved, _) = decrypted_manifest.resolve_recipients();
+        assert_eq!(resolved.len(), 2);
+        assert!(decrypted_content.contains("key2.txt"));
+
+        // Remount vault with key2 only and ensure mount_dir/.age_vault.toml has key2
+        let v_dir2 = vault_dir.clone();
+        let m_dir2 = mount_dir.clone();
+        let key2_clone2 = key2.clone();
+        let daemon_handle2 = thread::spawn(move || {
+            let c2 = Credentials::new().with_identities(vec![Box::new(key2_clone2)]);
+            mount_vault_with_credentials(
+                &v_dir2,
+                &m_dir2,
+                &c2,
+                None,
+                true,
+                1000,
+                VaultFormat::Age,
+                &[],
+                &[],
+                &[],
+            )
+        });
+
+        for _ in 0..50 {
+            if mount_dir.join("secret.txt").exists() && mount_dir.join(".age_vault.toml").exists() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+
+        let remount_manifest_text = fs::read_to_string(mount_dir.join(".age_vault.toml")).unwrap();
+        assert!(remount_manifest_text.contains("key2.txt"), "Decrypted manifest should keep added key2 identity");
+        let remount_secret = fs::read_to_string(mount_dir.join("secret.txt")).unwrap();
+        assert_eq!(remount_secret, "Top Secret With Identity");
+
+        unmount_vault(&mount_dir).expect("Unmount should succeed");
+        daemon_handle2.join().expect("Daemon 2 joined").expect("Daemon 2 succeeded");
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
     fn test_mount_fails_when_encrypted_manifest_cannot_be_decrypted() {
         let temp_dir = std::env::temp_dir().join(format!("valv_manifest_fail_{}", rand::rng().random::<u32>()));
         let vault_dir = temp_dir.join("vault");
@@ -618,6 +753,7 @@ mod tests {
         let manifest = crate::config::AgeVaultManifest {
             recipients: vec![pubkey.to_string()],
             recipients_files: Vec::new(),
+            ..Default::default()
         };
         let recips = vec![Box::new(pubkey.clone()) as Box<dyn age::Recipient + Send>];
         let creds = Credentials::new();

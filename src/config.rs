@@ -4,8 +4,20 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq, Eq)]
 pub struct AgeVaultManifest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub identity_files: Vec<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recipients: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipients_file: Option<PathBuf>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub recipients_files: Vec<PathBuf>,
 }
@@ -19,6 +31,123 @@ impl AgeVaultManifest {
         ".age_vault.toml",
         "age_vault.toml",
     ];
+
+    pub fn resolve_recipients(&self) -> (Vec<String>, Vec<PathBuf>) {
+        use std::str::FromStr;
+
+        let mut recipient_strs = Vec::new();
+        let mut recipient_file_paths = Vec::new();
+
+        let mut direct_recipients = Vec::new();
+        if let Some(ref r) = self.recipient {
+            direct_recipients.push(r.clone());
+        }
+        for r in &self.recipients {
+            direct_recipients.push(r.clone());
+        }
+
+        for r in direct_recipients {
+            let trimmed = r.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("AGE-SECRET-KEY-1") {
+                if let Ok(id) = age::x25519::Identity::from_str(trimmed) {
+                    let pk = id.to_public().to_string();
+                    if !recipient_strs.contains(&pk) {
+                        recipient_strs.push(pk);
+                    }
+                }
+            } else if trimmed.starts_with("age1")
+                || trimmed.starts_with("ssh-ed25519 ")
+                || trimmed.starts_with("ssh-rsa ")
+                || trimmed.starts_with("ecdsa-sha2-")
+            {
+                if !recipient_strs.contains(&trimmed.to_string()) {
+                    recipient_strs.push(trimmed.to_string());
+                }
+            } else {
+                let p = expand_tilde(Path::new(trimmed));
+                let derived = crate::crypto::extract_recipients_from_identity_file(&p);
+                for d in derived {
+                    if !recipient_strs.contains(&d) {
+                        recipient_strs.push(d);
+                    }
+                }
+            }
+        }
+
+        if let Some(ref rf) = self.recipients_file {
+            let expanded = expand_tilde(rf);
+            if !recipient_file_paths.contains(&expanded) {
+                recipient_file_paths.push(expanded);
+            }
+        }
+        for rf in &self.recipients_files {
+            let expanded = expand_tilde(rf);
+            if !recipient_file_paths.contains(&expanded) {
+                recipient_file_paths.push(expanded);
+            }
+        }
+
+        let mut identity_entries = Vec::new();
+        if let Some(ref id) = self.identity {
+            identity_entries.push(id.clone());
+        }
+        for id in &self.identities {
+            identity_entries.push(id.clone());
+        }
+
+        for id_entry in identity_entries {
+            let trimmed = id_entry.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed.starts_with("AGE-SECRET-KEY-1") {
+                if let Ok(id) = age::x25519::Identity::from_str(trimmed) {
+                    let pk = id.to_public().to_string();
+                    if !recipient_strs.contains(&pk) {
+                        recipient_strs.push(pk);
+                    }
+                }
+            } else if trimmed.starts_with("age1")
+                || trimmed.starts_with("ssh-ed25519 ")
+                || trimmed.starts_with("ssh-rsa ")
+                || trimmed.starts_with("ecdsa-sha2-")
+            {
+                if !recipient_strs.contains(&trimmed.to_string()) {
+                    recipient_strs.push(trimmed.to_string());
+                }
+            } else {
+                let p = expand_tilde(Path::new(trimmed));
+                let derived = crate::crypto::extract_recipients_from_identity_file(&p);
+                for d in derived {
+                    if !recipient_strs.contains(&d) {
+                        recipient_strs.push(d);
+                    }
+                }
+            }
+        }
+
+        let mut id_files = Vec::new();
+        if let Some(ref idf) = self.identity_file {
+            id_files.push(idf.clone());
+        }
+        for idf in &self.identity_files {
+            id_files.push(idf.clone());
+        }
+        for idf in id_files {
+            let p = expand_tilde(&idf);
+            let derived = crate::crypto::extract_recipients_from_identity_file(&p);
+            for d in derived {
+                if !recipient_strs.contains(&d) {
+                    recipient_strs.push(d);
+                }
+            }
+        }
+
+        (recipient_strs, recipient_file_paths)
+    }
 
     pub fn find_in_dir(dir: &Path) -> Option<PathBuf> {
         for name in Self::FILE_NAMES {
@@ -101,9 +230,15 @@ pub struct AgeConfig {
     /// Multiple age identity file paths
     #[serde(default)]
     pub identities: Vec<PathBuf>,
+    /// Single recipient public key
+    #[serde(default)]
+    pub recipient: Option<String>,
     /// Default recipient public keys (e.g. age1...)
     #[serde(default)]
     pub recipients: Vec<String>,
+    /// Single recipient file
+    #[serde(default)]
+    pub recipients_file: Option<PathBuf>,
     /// Default recipient files
     #[serde(default)]
     pub recipients_files: Vec<PathBuf>,
@@ -150,6 +285,12 @@ impl ValvConfig {
             return cli_identities.iter().map(|p| expand_tilde(p)).collect();
         }
         let mut ids = Vec::new();
+        if let Some(ref id) = self.identity {
+            ids.push(expand_tilde(id));
+        }
+        for id in &self.identities {
+            ids.push(expand_tilde(id));
+        }
         if let Some(ref id) = self.age.identity {
             ids.push(expand_tilde(id));
         }
@@ -171,14 +312,38 @@ impl ValvConfig {
         if !cli_recipients.is_empty() {
             return cli_recipients.to_vec();
         }
-        self.age.recipients.clone()
+        let mut recips = Vec::new();
+        if let Some(ref r) = self.age.recipient {
+            if !recips.contains(r) {
+                recips.push(r.clone());
+            }
+        }
+        for r in &self.age.recipients {
+            if !recips.contains(r) {
+                recips.push(r.clone());
+            }
+        }
+        recips
     }
 
     pub fn resolve_recipients_files(&self, cli_recipients_files: &[PathBuf]) -> Vec<PathBuf> {
         if !cli_recipients_files.is_empty() {
             return cli_recipients_files.iter().map(|p| expand_tilde(p)).collect();
         }
-        self.age.recipients_files.iter().map(|p| expand_tilde(p)).collect()
+        let mut files = Vec::new();
+        if let Some(ref f) = self.age.recipients_file {
+            let exp = expand_tilde(f);
+            if !files.contains(&exp) {
+                files.push(exp);
+            }
+        }
+        for f in &self.age.recipients_files {
+            let exp = expand_tilde(f);
+            if !files.contains(&exp) {
+                files.push(exp);
+            }
+        }
+        files
     }
 }
 
@@ -342,6 +507,38 @@ recipients_files = ["~/.config/age/recipients.txt"]
         assert!(is_manifest_file(&manifest_file));
         assert!(is_manifest_file(Path::new("age_vault.toml")));
         assert!(!is_manifest_file(Path::new("document.txt")));
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_age_vault_manifest_resolve_recipients_identities() {
+        use age::secrecy::ExposeSecret;
+        let temp_dir = std::env::temp_dir().join(format!("valv_manifest_id_test_{}", rand::random::<u32>()));
+        fs::create_dir_all(&temp_dir).unwrap();
+
+        let key1 = age::x25519::Identity::generate();
+        let pubkey1 = key1.to_public().to_string();
+        let key2 = age::x25519::Identity::generate();
+        let pubkey2 = key2.to_public().to_string();
+
+        let key_file = temp_dir.join("key2.txt");
+        fs::write(&key_file, format!("# public key: {}\n{}\n", pubkey2, key2.to_string().expose_secret())).unwrap();
+
+        let toml_str = format!(
+            "identity = \"{}\"\nidentities = [\"{}\"]\nrecipient = \"{}\"\n",
+            key_file.display(),
+            key1.to_string().expose_secret(),
+            pubkey1
+        );
+
+        let manifest: AgeVaultManifest = toml::from_str(&toml_str).unwrap();
+        let (resolved_recips, resolved_files) = manifest.resolve_recipients();
+
+        assert!(resolved_recips.contains(&pubkey1));
+        assert!(resolved_recips.contains(&pubkey2));
+        assert_eq!(resolved_recips.len(), 2);
+        assert!(resolved_files.is_empty());
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

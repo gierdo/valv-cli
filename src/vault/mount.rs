@@ -118,7 +118,8 @@ pub fn mount_vault_with_credentials(
 
     let mut manifest_recip_list = Vec::new();
     if let Some((manifest, manifest_path, content)) = manifest_info {
-        manifest_recip_list = manifest.recipients.clone();
+        let (resolved_manifest_recips, resolved_manifest_files) = manifest.resolve_recipients();
+        manifest_recip_list = resolved_manifest_recips;
 
         let mount_manifest_name = if manifest_path
             .file_name()
@@ -133,8 +134,14 @@ pub fn mount_vault_with_credentials(
         let mount_manifest_file = mount_dir.join(mount_manifest_name);
         fs::write(&mount_manifest_file, content)?;
 
+        let fallback_recips;
         let recips_for_init = if !recipients.is_empty() {
             recipients
+        } else if let Ok(loaded) = crate::crypto::load_recipients(&manifest_recip_list, &resolved_manifest_files)
+            && !loaded.is_empty()
+        {
+            fallback_recips = loaded;
+            &fallback_recips[..]
         } else {
             &[]
         };
@@ -149,6 +156,10 @@ pub fn mount_vault_with_credentials(
         );
     }
 
+    if manifest_recip_list.is_empty() && !recipient_strings.is_empty() {
+        manifest_recip_list = recipient_strings.to_vec();
+    }
+
     let mut session = ValvSession {
         vault_dir: fs::canonicalize(vault_dir).unwrap_or_else(|_| vault_dir.to_path_buf()),
         watch_pid,
@@ -158,7 +169,7 @@ pub fn mount_vault_with_credentials(
             VaultFormat::Age => "age".to_string(),
             VaultFormat::Valv => "valv".to_string(),
         }),
-        manifest_recipients: manifest_recip_list,
+        manifest_recipients: manifest_recip_list.clone(),
     };
 
     // Decrypt all existing files (including nested subdirectories) into mount_dir via streaming
@@ -320,11 +331,17 @@ pub fn mount_vault_with_credentials(
         }
 
         for path in identity_paths {
-            cmd.arg("-i").arg(path);
+            cmd.arg("-k").arg(path);
+        }
+
+        for recip in &manifest_recip_list {
+            cmd.arg("-r").arg(recip);
         }
 
         for recip in recipient_strings {
-            cmd.arg("-r").arg(recip);
+            if !manifest_recip_list.contains(recip) {
+                cmd.arg("-r").arg(recip);
+            }
         }
 
         if let Some(pid) = watch_pid {

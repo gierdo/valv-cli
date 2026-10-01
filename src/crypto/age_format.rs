@@ -98,10 +98,11 @@ pub fn extract_recipients_from_identity_file(path: &std::path::Path) -> Vec<Stri
     use std::str::FromStr;
     let mut recipients = Vec::new();
 
-    let mut files_to_check = vec![path.to_path_buf()];
-    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    let expanded_path = crate::config::expand_tilde(path);
+    let mut files_to_check = vec![expanded_path.clone()];
+    let file_name = expanded_path.file_name().unwrap_or_default().to_string_lossy();
     if !file_name.ends_with(".pub") {
-        let mut pub_file = path.to_path_buf();
+        let mut pub_file = expanded_path.clone();
         pub_file.set_file_name(format!("{}.pub", file_name));
         if pub_file.is_file() {
             files_to_check.push(pub_file);

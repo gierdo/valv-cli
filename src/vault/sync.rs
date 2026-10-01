@@ -127,12 +127,14 @@ pub fn run_sync_daemon_with_credentials(
     }
 
     let close_trigger = mount_dir.join(".valv_close");
-    let mut current_recipients: Vec<Box<dyn age::Recipient + Send>> = if !recipients.is_empty() {
-        if let Ok(Some((manifest, _, _))) = crate::config::AgeVaultManifest::load_from_dir_with_credentials(vault_dir, credentials) {
-            crate::crypto::load_recipients(&manifest.recipients, &manifest.recipients_files).unwrap_or_default()
-        } else {
-            Vec::new()
-        }
+    let mut current_recipients: Vec<Box<dyn age::Recipient + Send>> = if let Some(mount_manifest_path) = crate::config::AgeVaultManifest::find_in_dir(mount_dir)
+        && let Ok((manifest, _)) = crate::config::AgeVaultManifest::load_from_file_with_credentials(&mount_manifest_path, credentials)
+    {
+        let (r_strs, r_files) = manifest.resolve_recipients();
+        crate::crypto::load_recipients(&r_strs, &r_files).unwrap_or_default()
+    } else if let Ok(Some((manifest, _, _))) = crate::config::AgeVaultManifest::load_from_dir_with_credentials(vault_dir, credentials) {
+        let (r_strs, r_files) = manifest.resolve_recipients();
+        crate::crypto::load_recipients(&r_strs, &r_files).unwrap_or_default()
     } else {
         Vec::new()
     };
@@ -163,13 +165,15 @@ pub fn run_sync_daemon_with_credentials(
         };
 
         let effective_recipients: &[Box<dyn age::Recipient + Send>] = if let Some((ref manifest, _)) = active_manifest_info {
-            let recipients_changed = !manifest.recipients.is_empty() && manifest.recipients != session.manifest_recipients;
+            let (new_recip_strs, new_recip_files) = manifest.resolve_recipients();
+            let recipients_changed = (!new_recip_strs.is_empty() || !new_recip_files.is_empty())
+                && new_recip_strs != session.manifest_recipients;
             if recipients_changed
-                && let Ok(new_recips) = crate::crypto::load_recipients(&manifest.recipients, &manifest.recipients_files)
+                && let Ok(new_recips) = crate::crypto::load_recipients(&new_recip_strs, &new_recip_files)
                 && !new_recips.is_empty()
             {
                 current_recipients = new_recips;
-                session.manifest_recipients = manifest.recipients.clone();
+                session.manifest_recipients = new_recip_strs.clone();
 
                 // Re-encrypt all existing files in session.files with updated recipients
                 for (rel_dest_path, item) in &session.files {
@@ -186,6 +190,12 @@ pub fn run_sync_daemon_with_credentials(
                             &current_recipients,
                         );
                     }
+                }
+            }
+
+            if current_recipients.is_empty() && (!new_recip_strs.is_empty() || !new_recip_files.is_empty()) {
+                if let Ok(loaded) = crate::crypto::load_recipients(&new_recip_strs, &new_recip_files) {
+                    current_recipients = loaded;
                 }
             }
 
