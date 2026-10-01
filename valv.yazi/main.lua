@@ -31,14 +31,14 @@ local function file_exists(path)
 	return false
 end
 
-local function is_vault_path(path)
+local function is_vault_file(path)
 	local filename = (path:match("[^/\\]+$") or path):lower()
 	return filename:sub(-5) == ".valv"
 		or filename:sub(-4) == ".age"
 		or filename:find("^%.?age_vault%.toml") ~= nil
 end
 
-local function dir_has_vault_manifest(dir)
+local function dir_has_vault_content(dir)
 	local manifest_names = {
 		".age_vault.toml.age",
 		"age_vault.toml.age",
@@ -46,6 +46,7 @@ local function dir_has_vault_manifest(dir)
 		"age_vault.toml.valv",
 		".age_vault.toml",
 		"age_vault.toml",
+		".valv_session.json",
 	}
 	for _, name in ipairs(manifest_names) do
 		if file_exists(dir .. "/" .. name) then
@@ -53,6 +54,34 @@ local function dir_has_vault_manifest(dir)
 		end
 	end
 	return false
+end
+
+local function parse_recipients(input_str)
+	local recips = {}
+	if not input_str or #input_str:gsub("%s+", "") == 0 then
+		return recips
+	end
+
+	if input_str:find(",") then
+		for r in input_str:gmatch("[^,]+") do
+			local trimmed = r:match("^%s*(.-)%s*$")
+			if #trimmed > 0 then
+				table.insert(recips, trimmed)
+			end
+		end
+	else
+		local trimmed = input_str:match("^%s*(.-)%s*$")
+		if #trimmed > 0 then
+			if trimmed:find(" age1") then
+				for r in trimmed:gmatch("%S+") do
+					table.insert(recips, r)
+				end
+			else
+				table.insert(recips, trimmed)
+			end
+		end
+	end
+	return recips
 end
 
 local function run_valv(args, password, quiet)
@@ -130,7 +159,7 @@ local function run_valv(args, password, quiet)
 end
 
 local function mount_vault(vault_dir)
-	-- 1. Try automatic mount with identities first (SOPS/config age identities)
+	-- 1. Try automatic mount with identities (SOPS/config age identities)
 	local output = run_valv({ "mount", vault_dir }, nil, true)
 	if output and output.status.success then
 		local mount_path = output.stdout:match("READY%s+([^\r\n]+)")
@@ -145,10 +174,10 @@ local function mount_vault(vault_dir)
 		end
 	end
 
-	-- 2. Identity not configured or password/passphrase required
+	-- 2. Prompt for password/passphrase if needed
 	local password, event = ya.input {
-		pos = { "top-center", y = 3, w = 40 },
 		title = "Open Vault Password/Passphrase:",
+		pos = { "top-center", y = 3, w = 40 },
 		obscure = true,
 	}
 
@@ -173,108 +202,99 @@ local function mount_vault(vault_dir)
 	return false
 end
 
-local function create_vault(vault_dir)
-	local cand = ya.which {
-		cands = {
-			{ on = "a", desc = "Create Age vault (encrypted manifest)" },
-			{ on = "v", desc = "Create Valv v2 vault (password)" },
-		},
+local function create_age_vault(vault_dir)
+	local recip_input, event = ya.input {
+		title = "Age recipient public key (leave empty to use local SOPS/config identity):",
+		pos = { "top-center", y = 3, w = 60 },
 	}
-	if not cand then
+	if event ~= 1 then
 		return false
 	end
 
-	if cand == 1 then
-		-- Age vault
-		local recip, event = ya.input {
-			pos = { "top-center", y = 3, w = 50 },
-			title = "Age recipient(s) (leave blank for SOPS/config identity):",
-		}
-		if event ~= 1 then
-			return false
-		end
+	local recips = parse_recipients(recip_input)
+	local args = { "init", vault_dir }
+	for _, r in ipairs(recips) do
+		table.insert(args, "-r")
+		table.insert(args, r)
+	end
 
-		local init_args = { "init", vault_dir }
-		if recip and #recip:gsub("%s+", "") > 0 then
-			for r in recip:gmatch("%S+") do
-				table.insert(init_args, "-r")
-				table.insert(init_args, r)
-			end
-			local output = run_valv(init_args, nil, false)
-			if output and output.status.success then
-				ya.notify {
-					title = "Valv",
-					content = "Created Age vault. Mounting...",
-					timeout = 3.0,
-				}
-				return mount_vault(vault_dir)
-			end
-		else
-			-- Try init using auto-detected identity
-			local output = run_valv(init_args, nil, true)
-			if output and output.status.success then
-				ya.notify {
-					title = "Valv",
-					content = "Created Age vault with local identity. Mounting...",
-					timeout = 3.0,
-				}
-				return mount_vault(vault_dir)
-			else
-				-- Needs passphrase
-				local pwd, p_ev = ya.input {
-					pos = { "top-center", y = 3, w = 40 },
-					title = "Set Age Vault Passphrase:",
-					obscure = true,
-				}
-				if p_ev ~= 1 or not pwd or #pwd == 0 then
-					return false
-				end
-				local out = run_valv({ "init", vault_dir, "--age" }, pwd, false)
-				if out and out.status.success then
-					ya.notify {
-						title = "Valv",
-						content = "Created Age vault with passphrase. Mounting...",
-						timeout = 3.0,
-					}
-					return mount_vault(vault_dir)
-				end
-			end
-		end
-	elseif cand == 2 then
-		-- Valv v2 vault
-		local pwd, p_ev = ya.input {
-			pos = { "top-center", y = 3, w = 40 },
-			title = "Set Valv Vault Password:",
-			obscure = true,
-		}
-		if p_ev ~= 1 or not pwd or #pwd == 0 then
-			return false
-		end
-		local out = run_valv({ "init", vault_dir, "--valv" }, pwd, false)
-		if out and out.status.success then
+	if #recips > 0 then
+		local output = run_valv(args, nil, false)
+		if output and output.status.success then
 			ya.notify {
 				title = "Valv",
-				content = "Created Valv v2 vault. Mounting...",
+				content = "Created Age vault with specified recipient(s). Mounting...",
 				timeout = 3.0,
 			}
 			return mount_vault(vault_dir)
+		end
+	else
+		-- Try auto-init with identity from SOPS / config
+		local output = run_valv(args, nil, true)
+		if output and output.status.success then
+			ya.notify {
+				title = "Valv",
+				content = "Created Age vault with local identity. Mounting...",
+				timeout = 3.0,
+			}
+			return mount_vault(vault_dir)
+		else
+			-- If no local identity key exists, prompt for passphrase
+			local pwd, p_ev = ya.input {
+				title = "Set Age Vault Passphrase:",
+				pos = { "top-center", y = 3, w = 40 },
+				obscure = true,
+			}
+			if p_ev ~= 1 or not pwd or #pwd == 0 then
+				return false
+			end
+			local out = run_valv({ "init", vault_dir, "--age" }, pwd, false)
+			if out and out.status.success then
+				ya.notify {
+					title = "Valv",
+					content = "Created Age vault with passphrase. Mounting...",
+					timeout = 3.0,
+				}
+				return mount_vault(vault_dir)
+			end
 		end
 	end
 
 	return false
 end
 
+local function create_valv_vault(vault_dir)
+	local pwd, p_ev = ya.input {
+		title = "Set Valv Vault Password:",
+		pos = { "top-center", y = 3, w = 40 },
+		obscure = true,
+	}
+	if p_ev ~= 1 or not pwd or #pwd == 0 then
+		return false
+	end
+
+	local out = run_valv({ "init", vault_dir, "--valv" }, pwd, false)
+	if out and out.status.success then
+		ya.notify {
+			title = "Valv",
+			content = "Created Valv v2 vault. Mounting...",
+			timeout = 3.0,
+		}
+		return mount_vault(vault_dir)
+	end
+	return false
+end
+
 function M:entry(job)
 	local cwd = get_current_cwd()
 
-	-- Case 1: Currently inside an active Valv mount session
+	-- Case 1: Inside active Valv mount session -> lock/unmount
 	if cwd:find("/valv%-") or file_exists(cwd .. "/.valv_session.json") then
 		local confirm, event = ya.input {
-			pos = { "top-center", y = 3, w = 40 },
 			title = "Lock and unmount vault? (Y/n)",
+			pos = { "top-center", y = 3, w = 40 },
 		}
 		if event == 1 and (confirm == "" or confirm:lower() == "y") then
-			-- Read session to find original vault directory
 			local orig_vault = nil
 			local f = io.open(cwd .. "/.valv_session.json", "r")
 			if f then
@@ -303,11 +323,11 @@ function M:entry(job)
 
 	local targets = get_targets()
 
-	-- Explicit subcommand passed in job args
+	-- Handle direct CLI subcommand argument
 	local subcmd = job and job.args and job.args[1]
 	if subcmd == "init" or subcmd == "create" then
 		local target_dir = (#targets == 1 and file_exists(targets[1] .. "/.")) and targets[1] or cwd
-		create_vault(target_dir)
+		create_age_vault(target_dir)
 		return
 	elseif subcmd == "unmount" or subcmd == "lock" then
 		local target = #targets > 0 and targets[1] or cwd
@@ -322,103 +342,54 @@ function M:entry(job)
 	-- Case 2: Target is a directory or current working directory
 	local target_is_dir = false
 	local vault_target_dir = cwd
-	if #targets == 1 then
-		if file_exists(targets[1] .. "/.") then
-			target_is_dir = true
-			vault_target_dir = targets[1]
-		end
+	if #targets == 1 and file_exists(targets[1] .. "/.") then
+		target_is_dir = true
+		vault_target_dir = targets[1]
 	end
 
 	local is_dir_candidate = target_is_dir or #targets == 0
 	if is_dir_candidate then
-		if dir_has_vault_manifest(vault_target_dir) then
-			-- Recognized vault -> mount automatically
+		if dir_has_vault_content(vault_target_dir) then
 			mount_vault(vault_target_dir)
 			return
 		else
-			-- Not an obvious vault -> offer choice: mount as existing, or initialize new Age/Valv vault
-			local cand = ya.which {
+			local idx = ya.which {
 				cands = {
-					{ on = "m", desc = "Open / Mount as vault" },
 					{ on = "a", desc = "Create Age vault (encrypted manifest)" },
 					{ on = "v", desc = "Create Valv v2 vault (password)" },
+					{ on = "m", desc = "Mount directory as vault" },
 				},
 			}
-			if not cand then
+			if not idx then
 				return
 			end
-			if cand == 1 then
+			if idx == 1 then
+				create_age_vault(vault_target_dir)
+			elseif idx == 2 then
+				create_valv_vault(vault_target_dir)
+			elseif idx == 3 then
 				mount_vault(vault_target_dir)
-			elseif cand == 2 then
-				-- Create Age vault
-				local recip, event = ya.input {
-					pos = { "top-center", y = 3, w = 50 },
-					title = "Age recipient(s) (leave blank for SOPS/config identity):",
-				}
-				if event == 1 then
-					local init_args = { "init", vault_target_dir }
-					if recip and #recip:gsub("%s+", "") > 0 then
-						for r in recip:gmatch("%S+") do
-							table.insert(init_args, "-r")
-							table.insert(init_args, r)
-						end
-						local output = run_valv(init_args, nil, false)
-						if output and output.status.success then
-							mount_vault(vault_target_dir)
-						end
-					else
-						local output = run_valv(init_args, nil, true)
-						if output and output.status.success then
-							mount_vault(vault_target_dir)
-						else
-							local pwd, p_ev = ya.input {
-								pos = { "top-center", y = 3, w = 40 },
-								title = "Set Age Vault Passphrase:",
-								obscure = true,
-							}
-							if p_ev == 1 and pwd and #pwd > 0 then
-								local out = run_valv({ "init", vault_target_dir, "--age" }, pwd, false)
-								if out and out.status.success then
-									mount_vault(vault_target_dir)
-								end
-							end
-						end
-					end
-				end
-			elseif cand == 3 then
-				-- Create Valv vault
-				local pwd, p_ev = ya.input {
-					pos = { "top-center", y = 3, w = 40 },
-					title = "Set Valv Vault Password:",
-					obscure = true,
-				}
-				if p_ev == 1 and pwd and #pwd > 0 then
-					local out = run_valv({ "init", vault_target_dir, "--valv" }, pwd, false)
-					if out and out.status.success then
-						mount_vault(vault_target_dir)
-					end
-				end
 			end
 			return
 		end
 	end
 
-	-- Case 3: Encrypt or decrypt specific file(s)
-	local vault_file_count = 0
+	-- Case 3: Target is one or more files
+	local has_vault_files = false
 	for _, path in ipairs(targets) do
-		if is_vault_path(path) then
-			vault_file_count = vault_file_count + 1
+		if is_vault_file(path) then
+			has_vault_files = true
+			break
 		end
 	end
 
-	if vault_file_count > 0 then
-		-- Decrypt files
+	if has_vault_files then
+		-- Decrypt vault files
 		local args = { "decrypt", "-o", cwd }
 		for _, path in ipairs(targets) do
 			table.insert(args, path)
 		end
 
-		-- Try with configured identities first
 		local output = run_valv(args, nil, true)
 		if output and output.status.success then
 			ya.notify {
@@ -430,10 +401,9 @@ function M:entry(job)
 			return
 		end
 
-		-- Prompt password if identity decryption was insufficient
 		local password, event = ya.input {
-			pos = { "top-center", y = 3, w = 40 },
 			title = "Valv/Age Decrypt Password/Passphrase:",
+			pos = { "top-center", y = 3, w = 40 },
 			obscure = true,
 		}
 		if event ~= 1 or not password or #password == 0 then
@@ -451,24 +421,23 @@ function M:entry(job)
 		end
 	else
 		-- Encrypt plain files
-		local cand = ya.which {
+		local idx = ya.which {
 			cands = {
 				{ on = "a", desc = "Encrypt with Age" },
 				{ on = "v", desc = "Encrypt with Valv v2" },
 			},
 		}
-		if not cand then
+		if not idx then
 			return
 		end
 
 		local args = { "encrypt" }
-		if cand == 1 then
+		if idx == 1 then
 			table.insert(args, "--age")
 			for _, path in ipairs(targets) do
 				table.insert(args, path)
 			end
 
-			-- Try with configured recipients first
 			local output = run_valv(args, nil, true)
 			if output and output.status.success then
 				ya.notify {
@@ -480,10 +449,9 @@ function M:entry(job)
 				return
 			end
 
-			-- Prompt passphrase if no recipient configured
 			local password, event = ya.input {
-				pos = { "top-center", y = 3, w = 40 },
 				title = "Age Encryption Passphrase:",
+				pos = { "top-center", y = 3, w = 40 },
 				obscure = true,
 			}
 			if event ~= 1 or not password or #password == 0 then
@@ -504,8 +472,8 @@ function M:entry(job)
 				table.insert(args, path)
 			end
 			local password, event = ya.input {
-				pos = { "top-center", y = 3, w = 40 },
 				title = "Valv Encrypt Password:",
+				pos = { "top-center", y = 3, w = 40 },
 				obscure = true,
 			}
 			if event ~= 1 or not password or #password == 0 then

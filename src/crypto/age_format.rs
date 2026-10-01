@@ -97,26 +97,70 @@ pub fn load_recipients(
 pub fn extract_recipients_from_identity_file(path: &std::path::Path) -> Vec<String> {
     use std::str::FromStr;
     let mut recipients = Vec::new();
-    if let Ok(content) = std::fs::read_to_string(path) {
-        for line in content.lines() {
-            let trimmed = line.trim();
-            if let Some(pubkey) = trimmed
-                .strip_prefix("# public key: ")
-                .or_else(|| trimmed.strip_prefix("# Public key: "))
-            {
-                let pk = pubkey.trim().to_string();
-                if !pk.is_empty() && !recipients.contains(&pk) {
-                    recipients.push(pk);
+
+    let mut files_to_check = vec![path.to_path_buf()];
+    let file_name = path.file_name().unwrap_or_default().to_string_lossy();
+    if !file_name.ends_with(".pub") {
+        let mut pub_file = path.to_path_buf();
+        pub_file.set_file_name(format!("{}.pub", file_name));
+        if pub_file.is_file() {
+            files_to_check.push(pub_file);
+        }
+    }
+
+    for file_path in files_to_check {
+        if let Ok(content) = std::fs::read_to_string(&file_path) {
+            for line in content.lines() {
+                let trimmed = line.trim();
+                let lower = trimmed.to_ascii_lowercase();
+
+                let prefix_match = [
+                    "# public key:",
+                    "# public-key:",
+                    "# public_key:",
+                    "# recipient:",
+                    "# recipient key:",
+                    "# recipient-key:",
+                ];
+
+                let mut matched = false;
+                for prefix in prefix_match {
+                    if lower.starts_with(prefix) {
+                        let pk = trimmed[prefix.len()..].trim().to_string();
+                        if !pk.is_empty() && !recipients.contains(&pk) {
+                            recipients.push(pk);
+                        }
+                        matched = true;
+                        break;
+                    }
                 }
-            } else if trimmed.starts_with("AGE-SECRET-KEY-1")
-                && let Ok(identity) = age::x25519::Identity::from_str(trimmed)
-            {
-                let pk = identity.to_public().to_string();
-                if !recipients.contains(&pk) {
-                    recipients.push(pk);
+                if matched {
+                    continue;
+                }
+
+                if trimmed.starts_with("AGE-SECRET-KEY-1")
+                    && let Ok(identity) = age::x25519::Identity::from_str(trimmed)
+                {
+                    let pk = identity.to_public().to_string();
+                    if !recipients.contains(&pk) {
+                        recipients.push(pk);
+                    }
+                    continue;
+                }
+
+                if trimmed.starts_with("age1")
+                    || trimmed.starts_with("ssh-ed25519 ")
+                    || trimmed.starts_with("ssh-rsa ")
+                    || trimmed.starts_with("ecdsa-sha2-")
+                {
+                    let pk = trimmed.to_string();
+                    if !recipients.contains(&pk) {
+                        recipients.push(pk);
+                    }
                 }
             }
         }
     }
+
     recipients
 }

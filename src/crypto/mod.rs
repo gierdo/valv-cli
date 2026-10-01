@@ -376,6 +376,23 @@ mod tests {
         let extracted_raw = extract_recipients_from_identity_file(&key_file);
         assert_eq!(extracted_raw, vec![pubkey.to_string()]);
 
+        // Format 3: With "# Recipient: " (e.g. age-plugin-tpm or sops keys.txt)
+        let content_recipient_hdr = format!(
+            "# Created: 2026-09-30 11:51:01\n# Recipient: {}\nAGE-PLUGIN-TPM-1XYZ\n",
+            pubkey
+        );
+        std::fs::write(&key_file, &content_recipient_hdr).unwrap();
+        let extracted_recip = extract_recipients_from_identity_file(&key_file);
+        assert_eq!(extracted_recip, vec![pubkey.to_string()]);
+
+        // Format 4: Companion .pub file
+        let private_key_file = temp_dir.join("id_test");
+        let pub_key_file = temp_dir.join("id_test.pub");
+        std::fs::write(&private_key_file, b"-----BEGIN OPENSSH PRIVATE KEY-----\n...").unwrap();
+        std::fs::write(&pub_key_file, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host\n").unwrap();
+        let extracted_ssh = extract_recipients_from_identity_file(&private_key_file);
+        assert_eq!(extracted_ssh, vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host"]);
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

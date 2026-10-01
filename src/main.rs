@@ -226,23 +226,37 @@ fn run_encrypt(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<
             }
         }
 
-        if let Some((_, ref manifest_path)) = manifest_in_dir {
-            let target_vault_dir = if let Some(ref out) = cli.output {
-                if out.is_dir() || files.len() > 1 {
-                    out.clone()
-                } else {
-                    out.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
-                }
-            } else if files.len() == 1 && files[0].is_dir() {
-                files[0].clone()
+        let target_vault_dir = if let Some(ref out) = cli.output {
+            if out.is_dir() || files.len() > 1 {
+                out.clone()
             } else {
-                PathBuf::from(".")
-            };
+                out.parent().unwrap_or_else(|| Path::new(".")).to_path_buf()
+            }
+        } else if files.len() == 1 && files[0].is_dir() {
+            files[0].clone()
+        } else {
+            PathBuf::from(".")
+        };
 
+        if let Some((_, ref manifest_path)) = manifest_in_dir {
             let creds = Credentials::new();
             let _ = save_encrypted_manifest(
                 manifest_path,
                 &target_vault_dir,
+                format,
+                &recipients,
+                &creds,
+                iterations,
+            );
+        } else if format == VaultFormat::Age && !recipient_strs.is_empty() && files.len() == 1 && files[0].is_dir() {
+            let manifest = AgeVaultManifest {
+                recipients: recipient_strs.clone(),
+                recipients_files: recipient_file_paths.clone(),
+            };
+            let creds = Credentials::new();
+            let _ = create_encrypted_manifest(
+                &target_vault_dir,
+                &manifest,
                 format,
                 &recipients,
                 &creds,
@@ -1126,6 +1140,33 @@ mod tests {
         let cli_init_dup = CliArgs::try_parse_from(init_dup_args).unwrap();
         let (_mode_dup, files_dup) = cli_init_dup.resolve_mode_and_files(is_valv_file);
         assert!(run_init(&cli_init_dup, &ValvConfig::default(), &files_dup).is_err());
+
+        let _ = fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_encrypt_directory_creates_age_vault_manifest() {
+        let temp_dir =
+            std::env::temp_dir().join(format!("valv_enc_manifest_test_{}", rand::random::<u32>()));
+        let source_dir = temp_dir.join("plain_data");
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::write(source_dir.join("file1.txt"), b"hello world").unwrap();
+
+        let key = age::x25519::Identity::generate();
+        let pubkey = key.to_public().to_string();
+
+        let enc_args = vec![
+            "valv",
+            "encrypt",
+            "-r",
+            &pubkey,
+            source_dir.to_str().unwrap(),
+        ];
+        let cli_enc = CliArgs::try_parse_from(enc_args).unwrap();
+        let (_mode_enc, files_enc) = cli_enc.resolve_mode_and_files(is_valv_file);
+        run_encrypt(&cli_enc, &ValvConfig::default(), &files_enc).expect("run_encrypt should succeed");
+
+        assert!(source_dir.join(".age_vault.toml.age").exists());
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
