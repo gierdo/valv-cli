@@ -706,18 +706,59 @@ fn run_mount(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<()
         VaultFormat::Valv
     };
 
-    let res = mount_vault_with_credentials(
-        &vault_dir,
-        &mount_dir,
-        &credentials,
-        watch_pid,
-        cli.foreground,
-        iterations,
-        format,
-        &recipients,
-        &identity_paths,
-        &recipient_strs,
-    );
+    let driver = cli.resolved_driver();
+    let use_fuse = match driver {
+        valv::cli::MountDriver::Fuse => true,
+        valv::cli::MountDriver::Tmpfs => false,
+        valv::cli::MountDriver::Auto => {
+            #[cfg(feature = "fuse")]
+            {
+                valv::vault::fuse_fs::fs::has_fuse_support()
+            }
+            #[cfg(not(feature = "fuse"))]
+            {
+                false
+            }
+        }
+    };
+
+    let res = if use_fuse {
+        #[cfg(feature = "fuse")]
+        {
+            valv::vault::fuse_fs::fs::mount_fuse_vault(
+                &vault_dir,
+                &mount_dir,
+                password.clone(),
+                watch_pid,
+                cli.foreground,
+                iterations,
+                format,
+                &recipient_strs,
+                &recipient_file_paths,
+                &identity_paths,
+            )
+        }
+        #[cfg(not(feature = "fuse"))]
+        {
+            Err(ValvError::Message(
+                "FUSE driver is not enabled in this build".to_string(),
+                1,
+            ))
+        }
+    } else {
+        mount_vault_with_credentials(
+            &vault_dir,
+            &mount_dir,
+            &credentials,
+            watch_pid,
+            cli.foreground,
+            iterations,
+            format,
+            &recipients,
+            &identity_paths,
+            &recipient_strs,
+        )
+    };
     if let Some(ref mut pwd) = password {
         valv::crypto::zeroize(pwd);
     }

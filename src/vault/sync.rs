@@ -379,6 +379,10 @@ pub fn unmount_vault(target_path: &Path) -> Result<(), ValvError> {
     if let Some(ref v_dir) = vault_dir {
         preserve_unsynced_dirs(&mount_dir, v_dir);
     }
+    #[cfg(feature = "fuse")]
+    {
+        let _ = crate::vault::fuse_fs::fs::unmount_fuse_target(&mount_dir);
+    }
     let _ = fs::remove_dir_all(&mount_dir);
     println!("Unmounted: {}", mount_dir.display());
     Ok(())

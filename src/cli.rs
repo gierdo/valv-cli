@@ -14,6 +14,14 @@ pub enum Mode {
     Mounts,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum, Default)]
+pub enum MountDriver {
+    #[default]
+    Auto,
+    Fuse,
+    Tmpfs,
+}
+
 /// Encrypt, decrypt, and transparently mount Valv (.valv) and Age (.age) files.
 #[derive(Parser, Debug, Clone)]
 #[command(
@@ -57,6 +65,18 @@ pub struct CliArgs {
     /// Use Valv v2 format
     #[arg(long = "valv", global = true)]
     pub valv: bool,
+
+    /// Mount driver to use (auto, fuse, or tmpfs)
+    #[arg(long = "driver", value_enum, default_value = "auto", global = true)]
+    pub driver: MountDriver,
+
+    /// Force use of FUSE filesystem driver
+    #[arg(long = "fuse", global = true)]
+    pub fuse: bool,
+
+    /// Force use of tmpfs RAM mount driver
+    #[arg(long = "tmpfs", global = true)]
+    pub tmpfs: bool,
 
     /// Output file or destination directory
     #[arg(short, long, global = true)]
@@ -137,6 +157,16 @@ pub enum Command {
 impl CliArgs {
     pub fn parse() -> Self {
         <Self as Parser>::parse()
+    }
+
+    pub fn resolved_driver(&self) -> MountDriver {
+        if self.fuse {
+            MountDriver::Fuse
+        } else if self.tmpfs {
+            MountDriver::Tmpfs
+        } else {
+            self.driver
+        }
     }
 
     #[cfg(test)]

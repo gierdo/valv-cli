@@ -273,11 +273,14 @@ valv mount ~/Pictures/Vault --watch-pid 12345
 # Mount without tying lifecycle to any PID
 valv mount ~/Pictures/Vault --no-watch
 
-# Mount in foreground mode (useful for debugging)
-valv mount ~/Pictures/Vault --foreground
+# Mount explicitly using FUSE driver (on-demand streaming decryption)
+valv mount ~/Pictures/Vault --driver fuse
 
-# Mount to a custom destination directory instead of /dev/shm
-valv mount ~/Pictures/Vault -o /dev/shm/custom_mount
+# Mount explicitly using tmpfs driver (in-memory RAM sync)
+valv mount ~/Pictures/Vault --driver tmpfs
+
+# Mount to a custom destination directory
+valv mount ~/Pictures/Vault -o /tmp/custom_mount
 ```
 
 ### 3. Unmount Commands (`unmount` / `close`)
@@ -360,6 +363,9 @@ All options below can be passed globally or with subcommands:
 | `-r, --recipient` | `<RECIPIENT>` | None | Age recipient public key (`age1...`, `ssh-...`, etc.). Can be specified multiple times. |
 | `-R, --recipients-file` | `<PATH>` | None | Path to file containing Age recipient public keys. Can be specified multiple times. |
 | `-k, --identity` | `<PATH>` | SOPS / Config | Path to Age identity file or SSH private key to decrypt with. Can be specified multiple times. |
+| `--driver` | `<auto\|fuse\|tmpfs>` | `auto` | Mounting driver to use (`fuse` for on-demand FUSE mount, `tmpfs` for in-memory RAM sync, or `auto`) |
+| `--fuse` | Flag | `false` | Force use of FUSE virtual filesystem driver |
+| `--tmpfs` | Flag | `false` | Force use of tmpfs RAM sync driver |
 | `--age` | Flag | Auto | Force use of Age format for encryption |
 | `--valv` | Flag | Auto | Force use of Valv v2 format for encryption |
 | `-o, --output` | `<PATH>` | Auto / `/dev/shm` | Destination file or directory for encryption, decryption, or mount point |

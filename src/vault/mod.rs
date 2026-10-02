@@ -1,3 +1,4 @@
+pub mod fuse_fs;
 pub mod manifest;
 pub mod mount;
 pub mod paths;
