@@ -223,3 +223,219 @@ fn test_fuse_age_vault_lifecycle() {
     let _ = unmount_fuse_target(&mount_dir);
     let _ = fs::remove_dir_all(&temp_dir);
 }
+
+#[test]
+fn test_fuse_move_file_into_new_directory_and_remount() {
+    if !has_fuse_support() {
+        return;
+    }
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "valv_fuse_mv_test_{}",
+        rand::rng().random::<u32>()
+    ));
+    let vault_dir = temp_dir.join("vault");
+    let mount_dir = temp_dir.join("mount");
+    fs::create_dir_all(&vault_dir).unwrap();
+    fs::create_dir_all(&mount_dir).unwrap();
+
+    let password = b"TestFuseMv123";
+    let file_path = vault_dir.join("initial-x.valv");
+    let mut out = BufWriter::new(File::create(&file_path).unwrap());
+    encrypt_stream(
+        &mut Cursor::new(b"Content to be moved"),
+        &mut out,
+        password,
+        "document.txt",
+        1000,
+    )
+    .unwrap();
+    drop(out);
+
+    // 1. Mount first time
+    let fs = ValvFuseFs::new(
+        &vault_dir,
+        Some(password.to_vec()),
+        VaultFormat::Valv,
+        1000,
+        vec![],
+        vec![],
+        vec![],
+        None,
+    )
+    .expect("ValvFuseFs creation");
+
+    let options = vec![MountOption::FSName("valv_mv_test".to_string())];
+    let session = match fuser::spawn_mount2(fs, &mount_dir, &options) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Skipping test: spawn_mount2 failed: {}", e);
+            let _ = fs::remove_dir_all(&temp_dir);
+            return;
+        }
+    };
+
+    // Wait for mount ready
+    for _ in 0..50 {
+        if mount_dir.join("document.txt").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(mount_dir.join("document.txt").exists());
+
+    // 2. Create new directory and move file into it
+    let sub_dir = mount_dir.join("subfolder");
+    fs::create_dir(&sub_dir).unwrap();
+    fs::rename(mount_dir.join("document.txt"), sub_dir.join("document.txt")).unwrap();
+
+    assert!(!mount_dir.join("document.txt").exists());
+    assert!(sub_dir.join("document.txt").exists());
+    let moved_content = fs::read_to_string(sub_dir.join("document.txt")).unwrap();
+    assert_eq!(moved_content, "Content to be moved");
+
+    // 3. Unmount
+    drop(session);
+    let _ = unmount_fuse_target(&mount_dir);
+
+    // 4. Mount second time to verify persistence of move
+    fs::create_dir_all(&mount_dir).unwrap();
+    let fs2 = ValvFuseFs::new(
+        &vault_dir,
+        Some(password.to_vec()),
+        VaultFormat::Valv,
+        1000,
+        vec![],
+        vec![],
+        vec![],
+        None,
+    )
+    .expect("ValvFuseFs creation 2");
+
+    let session2 = fuser::spawn_mount2(fs2, &mount_dir, &options).expect("spawn_mount2 2");
+
+    // Wait for remount ready
+    for _ in 0..50 {
+        if mount_dir.join("subfolder/document.txt").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert!(
+        !mount_dir.join("document.txt").exists(),
+        "File should not be at old root location"
+    );
+    assert!(
+        mount_dir.join("subfolder/document.txt").exists(),
+        "File should be at new subfolder location after remount"
+    );
+    let remount_content = fs::read_to_string(mount_dir.join("subfolder/document.txt")).unwrap();
+    assert_eq!(remount_content, "Content to be moved");
+
+    drop(session2);
+    let _ = unmount_fuse_target(&mount_dir);
+    let _ = fs::remove_dir_all(&temp_dir);
+}
+
+#[test]
+fn test_fuse_rename_directory_and_remount() {
+    if !has_fuse_support() {
+        return;
+    }
+
+    let temp_dir = std::env::temp_dir().join(format!(
+        "valv_fuse_rndir_test_{}",
+        rand::rng().random::<u32>()
+    ));
+    let vault_dir = temp_dir.join("vault");
+    let mount_dir = temp_dir.join("mount");
+    fs::create_dir_all(&vault_dir).unwrap();
+    fs::create_dir_all(&mount_dir).unwrap();
+
+    let password = b"TestFuseRnDir123";
+
+    // 1. Mount first time
+    let fs = ValvFuseFs::new(
+        &vault_dir,
+        Some(password.to_vec()),
+        VaultFormat::Valv,
+        1000,
+        vec![],
+        vec![],
+        vec![],
+        None,
+    )
+    .expect("ValvFuseFs creation");
+
+    let options = vec![MountOption::FSName("valv_rndir_test".to_string())];
+    let session = match fuser::spawn_mount2(fs, &mount_dir, &options) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("Skipping test: spawn_mount2 failed: {}", e);
+            let _ = fs::remove_dir_all(&temp_dir);
+            return;
+        }
+    };
+
+    // Wait for mount ready
+    for _ in 0..50 {
+        if mount_dir.join(".valv_session.json").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    // 2. Create dir1/sub and put a file in it
+    let dir1_sub = mount_dir.join("dir1/sub");
+    fs::create_dir_all(&dir1_sub).unwrap();
+    fs::write(dir1_sub.join("nested.txt"), b"Nested content in dir1").unwrap();
+
+    // 3. Rename dir1 to dir2
+    fs::rename(mount_dir.join("dir1"), mount_dir.join("dir2")).unwrap();
+
+    assert!(!mount_dir.join("dir1").exists());
+    assert!(mount_dir.join("dir2/sub/nested.txt").exists());
+    assert_eq!(
+        fs::read_to_string(mount_dir.join("dir2/sub/nested.txt")).unwrap(),
+        "Nested content in dir1"
+    );
+
+    // 4. Unmount
+    drop(session);
+    let _ = unmount_fuse_target(&mount_dir);
+
+    // 5. Remount and verify
+    fs::create_dir_all(&mount_dir).unwrap();
+    let fs2 = ValvFuseFs::new(
+        &vault_dir,
+        Some(password.to_vec()),
+        VaultFormat::Valv,
+        1000,
+        vec![],
+        vec![],
+        vec![],
+        None,
+    )
+    .expect("ValvFuseFs creation 2");
+
+    let session2 = fuser::spawn_mount2(fs2, &mount_dir, &options).expect("spawn_mount2 2");
+
+    for _ in 0..50 {
+        if mount_dir.join("dir2/sub/nested.txt").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+
+    assert!(!mount_dir.join("dir1").exists());
+    assert!(mount_dir.join("dir2/sub/nested.txt").exists());
+    assert_eq!(
+        fs::read_to_string(mount_dir.join("dir2/sub/nested.txt")).unwrap(),
+        "Nested content in dir1"
+    );
+
+    drop(session2);
+    let _ = unmount_fuse_target(&mount_dir);
+    let _ = fs::remove_dir_all(&temp_dir);
+}

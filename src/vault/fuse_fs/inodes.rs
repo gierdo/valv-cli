@@ -215,4 +215,18 @@ impl InodeTree {
 
         Some(entries)
     }
+
+    pub fn update_descendant_paths(&mut self, root_ino: u64, old_prefix: &Path, new_prefix: &Path) {
+        let mut stack = vec![root_ino];
+        while let Some(current_ino) = stack.pop() {
+            if let Some(entry) = self.inodes.get_mut(&current_ino) {
+                if let Some(ref p) = entry.vault_rel_path
+                    && let Ok(suffix) = p.strip_prefix(old_prefix)
+                {
+                    entry.vault_rel_path = Some(new_prefix.join(suffix));
+                }
+                stack.extend_from_slice(&entry.children);
+            }
+        }
+    }
 }

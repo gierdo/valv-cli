@@ -20,6 +20,8 @@ use super::handles::{HandleTable, OpenHandle};
 use super::inodes::{InodeEntry, InodeTree, TTL};
 #[cfg(feature = "fuse")]
 use super::storage::VaultStorage;
+#[cfg(feature = "fuse")]
+use crate::vault::paths::clean_empty_dirs_up_to;
 
 #[cfg(feature = "fuse")]
 pub struct ValvFuseFs {
@@ -534,32 +536,150 @@ impl Filesystem for ValvFuseFs {
             }
         };
 
-        // Overwrite destination if exists
+        let is_dir = self.tree.get(child_ino).map(|e| e.is_dir).unwrap_or(false);
+
+        // Check if destination exists
         if let Some(existing_dest_ino) = self.tree.find_child(newparent, &newname_str) {
-            self.tree.remove_child(newparent, existing_dest_ino);
-            if let Some(existing_entry) = self.tree.remove(existing_dest_ino)
-                && let Some(ref rel_p) = existing_entry.vault_rel_path
-            {
-                self.storage.remove_vault_file(rel_p);
+            let dest_is_dir = self
+                .tree
+                .get(existing_dest_ino)
+                .map(|e| e.is_dir)
+                .unwrap_or(false);
+
+            if is_dir && !dest_is_dir {
+                reply.error(libc::ENOTDIR);
+                return;
             }
+            if !is_dir && dest_is_dir {
+                reply.error(libc::EISDIR);
+                return;
+            }
+
+            if dest_is_dir {
+                let dest_entry = self.tree.get(existing_dest_ino).unwrap();
+                if !dest_entry.children.is_empty() {
+                    reply.error(libc::ENOTEMPTY);
+                    return;
+                }
+                if let Some(ref rel_p) = dest_entry.vault_rel_path {
+                    self.storage.remove_vault_dir(rel_p);
+                }
+            } else {
+                let dest_entry = self.tree.get(existing_dest_ino).unwrap();
+                if let Some(ref rel_p) = dest_entry.vault_rel_path {
+                    self.storage.remove_vault_file(rel_p);
+                }
+            }
+
+            self.tree.remove_child(newparent, existing_dest_ino);
+            self.tree.remove(existing_dest_ino);
             self.handles.invalidate_cache(existing_dest_ino);
         }
 
-        if parent != newparent {
-            self.tree.remove_child(parent, child_ino);
-            self.tree.add_child(newparent, child_ino);
-        }
+        if is_dir {
+            let old_vault_rel = self
+                .tree
+                .get(child_ino)
+                .and_then(|e| e.vault_rel_path.clone())
+                .unwrap_or_default();
+            let new_parent_rel = self
+                .tree
+                .get(newparent)
+                .and_then(|p| p.vault_rel_path.clone())
+                .unwrap_or_default();
+            let new_vault_rel = new_parent_rel.join(&newname_str);
 
-        let is_dir = self.tree.get(child_ino).map(|e| e.is_dir).unwrap_or(false);
+            if old_vault_rel != new_vault_rel {
+                let old_disk_path = self.storage.vault_dir.join(&old_vault_rel);
+                let new_disk_path = self.storage.vault_dir.join(&new_vault_rel);
+                if old_disk_path.exists() {
+                    if let Some(parent_dir) = new_disk_path.parent() {
+                        let _ = std::fs::create_dir_all(parent_dir);
+                    }
+                    if std::fs::rename(&old_disk_path, &new_disk_path).is_err() {
+                        reply.error(libc::EIO);
+                        return;
+                    }
+                    if let Some(parent_dir) = old_disk_path.parent() {
+                        clean_empty_dirs_up_to(&self.storage.vault_dir, parent_dir);
+                    }
+                } else {
+                    let _ = std::fs::create_dir_all(&new_disk_path);
+                }
 
-        if let Some(entry) = self.tree.get_mut(child_ino) {
-            entry.parent = newparent;
-            entry.name = newname_str;
-            entry.mtime = SystemTime::now();
-        }
+                self.tree
+                    .update_descendant_paths(child_ino, &old_vault_rel, &new_vault_rel);
+            }
 
-        if !is_dir && let Ok(content) = self.read_file_content(child_ino) {
-            let _ = self.save_file_to_vault(child_ino, &content);
+            if parent != newparent {
+                self.tree.remove_child(parent, child_ino);
+                self.tree.add_child(newparent, child_ino);
+            }
+
+            if let Some(entry) = self.tree.get_mut(child_ino) {
+                entry.parent = newparent;
+                entry.name = newname_str;
+                entry.vault_rel_path = Some(new_vault_rel);
+                entry.mtime = SystemTime::now();
+            }
+        } else {
+            let old_vault_rel = self
+                .tree
+                .get(child_ino)
+                .and_then(|e| e.vault_rel_path.clone());
+            let new_parent_rel = self
+                .tree
+                .get(newparent)
+                .and_then(|p| p.vault_rel_path.clone())
+                .unwrap_or_default();
+
+            let content = match self.read_file_content(child_ino) {
+                Ok(c) => c,
+                Err(err) => {
+                    reply.error(err);
+                    return;
+                }
+            };
+
+            if let Some(ref old_rel) = old_vault_rel {
+                self.storage.remove_vault_file(old_rel);
+            }
+
+            let entry_format = self
+                .tree
+                .get(child_ino)
+                .map(|e| e.format)
+                .unwrap_or(self.storage.default_format);
+
+            let new_vault_rel = match self.storage.save_file(
+                &newname_str,
+                &new_parent_rel,
+                None,
+                entry_format,
+                &content,
+            ) {
+                Ok(p) => p,
+                Err(err) => {
+                    reply.error(err);
+                    return;
+                }
+            };
+
+            if parent != newparent {
+                self.tree.remove_child(parent, child_ino);
+                self.tree.add_child(newparent, child_ino);
+            }
+
+            let now = SystemTime::now();
+            if let Some(entry) = self.tree.get_mut(child_ino) {
+                entry.parent = newparent;
+                entry.name = newname_str;
+                entry.vault_rel_path = Some(new_vault_rel);
+                entry.size = content.len() as u64;
+                entry.mtime = now;
+            }
+
+            self.handles.set_cache(child_ino, content, now);
         }
 
         reply.ok();
