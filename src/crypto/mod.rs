@@ -11,8 +11,8 @@ pub use age_format::{
     extract_recipients_from_identity_file, load_identities, load_recipients,
 };
 pub use types::{
-    zeroize, Credentials, DecryptError, DecryptedHeader, EncryptionMethod,
-    VaultFormat, BUFFER_SIZE, DEFAULT_ITERATIONS, MAX_ITERATIONS, MIN_ITERATIONS, VALV_V2,
+    BUFFER_SIZE, Credentials, DEFAULT_ITERATIONS, DecryptError, DecryptedHeader, EncryptionMethod,
+    MAX_ITERATIONS, MIN_ITERATIONS, VALV_V2, VaultFormat, zeroize,
 };
 pub use valv_format::{derive_key, encrypt_file, encrypt_stream, transform_stream};
 
@@ -65,9 +65,9 @@ pub fn decrypt_header_with_credentials<'a, R: Read + Send + 'a>(
         && !pwd.is_empty()
         && let Ok(pwd_str) = std::str::from_utf8(pwd)
     {
-        scrypt_id = Some(age::scrypt::Identity::new(age::secrecy::SecretString::from(
-            pwd_str.to_string(),
-        )));
+        scrypt_id = Some(age::scrypt::Identity::new(
+            age::secrecy::SecretString::from(pwd_str.to_string()),
+        ));
     }
 
     let mut id_refs: Vec<&dyn age::Identity> = credentials
@@ -161,8 +161,7 @@ mod tests {
         assert_eq!(&encrypted[..4], &VALV_V2.to_be_bytes());
 
         let enc_cursor = Cursor::new(&encrypted);
-        let mut header =
-            decrypt_header(enc_cursor, password).expect("Decryption header failed");
+        let mut header = decrypt_header(enc_cursor, password).expect("Decryption header failed");
         assert_eq!(header.original_name, original_name);
 
         let mut decrypted_payload = Vec::new();
@@ -251,8 +250,8 @@ mod tests {
             .expect("Age encryption failed");
 
         let enc_cursor = Cursor::new(&encrypted);
-        let mut header = decrypt_header(enc_cursor, passphrase.as_bytes())
-            .expect("Age decryption failed");
+        let mut header =
+            decrypt_header(enc_cursor, passphrase.as_bytes()).expect("Age decryption failed");
         assert_eq!(header.original_name, original_name);
 
         let mut decrypted_payload = Vec::new();
@@ -331,10 +330,21 @@ mod tests {
         // Format 4: Companion .pub file
         let private_key_file = temp_dir.join("id_test");
         let pub_key_file = temp_dir.join("id_test.pub");
-        std::fs::write(&private_key_file, b"-----BEGIN OPENSSH PRIVATE KEY-----\n...").unwrap();
-        std::fs::write(&pub_key_file, "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host\n").unwrap();
+        std::fs::write(
+            &private_key_file,
+            b"-----BEGIN OPENSSH PRIVATE KEY-----\n...",
+        )
+        .unwrap();
+        std::fs::write(
+            &pub_key_file,
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host\n",
+        )
+        .unwrap();
         let extracted_ssh = extract_recipients_from_identity_file(&private_key_file);
-        assert_eq!(extracted_ssh, vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host"]);
+        assert_eq!(
+            extracted_ssh,
+            vec!["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAI... user@host"]
+        );
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
@@ -358,7 +368,9 @@ mod tests {
         let mut header = decrypt_header_with_credentials(Cursor::new(&encrypted_empty), &creds)
             .expect("Decrypt empty header failed");
         let mut out = Vec::new();
-        header.decrypt_payload(&mut out).expect("Decrypt empty payload failed");
+        header
+            .decrypt_payload(&mut out)
+            .expect("Decrypt empty payload failed");
         assert_eq!(out, b"");
 
         // 2. Exact 64KB (65536 bytes) payload
@@ -375,12 +387,16 @@ mod tests {
         let mut header_64k = decrypt_header_with_credentials(Cursor::new(&encrypted_64k), &creds)
             .expect("Decrypt 64k header failed");
         let mut out_64k = Vec::new();
-        header_64k.decrypt_payload(&mut out_64k).expect("Decrypt 64k payload failed");
+        header_64k
+            .decrypt_payload(&mut out_64k)
+            .expect("Decrypt 64k payload failed");
         assert_eq!(out_64k, payload_64k);
 
         // 3. Raw age-encrypted file without Valv metadata prefix
         let raw_plaintext = b"recipients = [\"age1...\"]\n[vault]\n";
-        let encryptor = age::Encryptor::with_recipients(std::iter::once(&pubkey as &dyn age::Recipient)).unwrap();
+        let encryptor =
+            age::Encryptor::with_recipients(std::iter::once(&pubkey as &dyn age::Recipient))
+                .unwrap();
         let mut raw_encrypted = Vec::new();
         let mut age_w = encryptor.wrap_output(&mut raw_encrypted).unwrap();
         std::io::copy(&mut Cursor::new(raw_plaintext), &mut age_w).unwrap();
@@ -389,7 +405,9 @@ mod tests {
         let mut raw_header = decrypt_header_with_credentials(Cursor::new(&raw_encrypted), &creds)
             .expect("Decrypt raw age header failed");
         let mut raw_out = Vec::new();
-        raw_header.decrypt_payload(&mut raw_out).expect("Decrypt raw age payload failed");
+        raw_header
+            .decrypt_payload(&mut raw_out)
+            .expect("Decrypt raw age payload failed");
         assert_eq!(raw_out, raw_plaintext);
     }
 }

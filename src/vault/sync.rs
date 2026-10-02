@@ -7,7 +7,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use crate::ValvError;
 use crate::crypto::{
-    encrypt_stream_unified, Credentials, EncryptionMethod, VaultFormat, BUFFER_SIZE,
+    BUFFER_SIZE, Credentials, EncryptionMethod, VaultFormat, encrypt_stream_unified,
 };
 
 use super::manifest::save_encrypted_manifest;
@@ -15,7 +15,7 @@ use super::paths::{
     clean_empty_dirs_up_to, collect_plain_files, generate_random_filename,
     get_suffix_for_path_and_format, get_thumbnail_valv_name,
 };
-use super::session::{is_process_alive, list_mounts, SessionFileEntry, ValvSession};
+use super::session::{SessionFileEntry, ValvSession, is_process_alive, list_mounts};
 use super::thumbnail::create_thumbnail_file_unified;
 
 pub static TERMINATE: AtomicBool = AtomicBool::new(false);
@@ -127,17 +127,24 @@ pub fn run_sync_daemon_with_credentials(
     }
 
     let close_trigger = mount_dir.join(".valv_close");
-    let mut current_recipients: Vec<Box<dyn age::Recipient + Send>> = if let Some(mount_manifest_path) = crate::config::AgeVaultManifest::find_in_dir(mount_dir)
-        && let Ok((manifest, _)) = crate::config::AgeVaultManifest::load_from_file_with_credentials(&mount_manifest_path, credentials)
-    {
-        let (r_strs, r_files) = manifest.resolve_recipients();
-        crate::crypto::load_recipients(&r_strs, &r_files).unwrap_or_default()
-    } else if let Ok(Some((manifest, _, _))) = crate::config::AgeVaultManifest::load_from_dir_with_credentials(vault_dir, credentials) {
-        let (r_strs, r_files) = manifest.resolve_recipients();
-        crate::crypto::load_recipients(&r_strs, &r_files).unwrap_or_default()
-    } else {
-        Vec::new()
-    };
+    let mut current_recipients: Vec<Box<dyn age::Recipient + Send>> =
+        if let Some(mount_manifest_path) = crate::config::AgeVaultManifest::find_in_dir(mount_dir)
+            && let Ok((manifest, _)) =
+                crate::config::AgeVaultManifest::load_from_file_with_credentials(
+                    &mount_manifest_path,
+                    credentials,
+                )
+        {
+            let (r_strs, r_files) = manifest.resolve_recipients();
+            crate::crypto::load_recipients(&r_strs, &r_files).unwrap_or_default()
+        } else if let Ok(Some((manifest, _, _))) =
+            crate::config::AgeVaultManifest::load_from_dir_with_credentials(vault_dir, credentials)
+        {
+            let (r_strs, r_files) = manifest.resolve_recipients();
+            crate::crypto::load_recipients(&r_strs, &r_files).unwrap_or_default()
+        } else {
+            Vec::new()
+        };
 
     loop {
         if TERMINATE.load(Ordering::SeqCst) {
@@ -159,73 +166,79 @@ pub fn run_sync_daemon_with_credentials(
         // 3. Sync manifest file between mount_dir and vault_dir and re-encrypt if recipients changed
         let mount_manifest_path = crate::config::AgeVaultManifest::find_in_dir(mount_dir);
         let active_manifest_info = if let Some(ref p_mount) = mount_manifest_path {
-            crate::config::AgeVaultManifest::load_from_file_with_credentials(p_mount, credentials).ok()
+            crate::config::AgeVaultManifest::load_from_file_with_credentials(p_mount, credentials)
+                .ok()
         } else {
             None
         };
 
-        let effective_recipients: &[Box<dyn age::Recipient + Send>] = if let Some((ref manifest, _)) = active_manifest_info {
-            let (new_recip_strs, new_recip_files) = manifest.resolve_recipients();
-            let recipients_changed = (!new_recip_strs.is_empty() || !new_recip_files.is_empty())
-                && new_recip_strs != session.manifest_recipients;
-            if recipients_changed
-                && let Ok(new_recips) = crate::crypto::load_recipients(&new_recip_strs, &new_recip_files)
-                && !new_recips.is_empty()
-            {
-                current_recipients = new_recips;
-                session.manifest_recipients = new_recip_strs.clone();
+        let effective_recipients: &[Box<dyn age::Recipient + Send>] =
+            if let Some((ref manifest, _)) = active_manifest_info {
+                let (new_recip_strs, new_recip_files) = manifest.resolve_recipients();
+                let recipients_changed = (!new_recip_strs.is_empty()
+                    || !new_recip_files.is_empty())
+                    && new_recip_strs != session.manifest_recipients;
+                if recipients_changed
+                    && let Ok(new_recips) =
+                        crate::crypto::load_recipients(&new_recip_strs, &new_recip_files)
+                    && !new_recips.is_empty()
+                {
+                    current_recipients = new_recips;
+                    session.manifest_recipients = new_recip_strs.clone();
 
-                // Re-encrypt all existing files in session.files with updated recipients
-                for (rel_dest_path, item) in &session.files {
-                    let src_path = mount_dir.join(rel_dest_path);
-                    let filename = src_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-                    if src_path.exists() {
-                        let _ = sync_file_to_vault(
-                            &src_path,
-                            vault_dir,
-                            &item.valv_name,
-                            filename,
-                            credentials,
-                            iterations,
-                            &current_recipients,
-                        );
+                    // Re-encrypt all existing files in session.files with updated recipients
+                    for (rel_dest_path, item) in &session.files {
+                        let src_path = mount_dir.join(rel_dest_path);
+                        let filename = src_path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                        if src_path.exists() {
+                            let _ = sync_file_to_vault(
+                                &src_path,
+                                vault_dir,
+                                &item.valv_name,
+                                filename,
+                                credentials,
+                                iterations,
+                                &current_recipients,
+                            );
+                        }
                     }
                 }
-            }
 
-            if current_recipients.is_empty() && (!new_recip_strs.is_empty() || !new_recip_files.is_empty()) {
-                if let Ok(loaded) = crate::crypto::load_recipients(&new_recip_strs, &new_recip_files) {
+                if current_recipients.is_empty()
+                    && (!new_recip_strs.is_empty() || !new_recip_files.is_empty())
+                    && let Ok(loaded) =
+                        crate::crypto::load_recipients(&new_recip_strs, &new_recip_files)
+                {
                     current_recipients = loaded;
                 }
-            }
 
-            let recips_for_manifest = if !current_recipients.is_empty() {
-                &current_recipients[..]
-            } else {
-                recipients
-            };
+                let recips_for_manifest = if !current_recipients.is_empty() {
+                    &current_recipients[..]
+                } else {
+                    recipients
+                };
 
-            if let Some(ref p_mount) = mount_manifest_path {
-                let _ = save_encrypted_manifest(
-                    p_mount,
-                    vault_dir,
-                    default_format,
-                    recips_for_manifest,
-                    credentials,
-                    iterations,
-                );
-            }
+                if let Some(ref p_mount) = mount_manifest_path {
+                    let _ = save_encrypted_manifest(
+                        p_mount,
+                        vault_dir,
+                        default_format,
+                        recips_for_manifest,
+                        credentials,
+                        iterations,
+                    );
+                }
 
-            if !current_recipients.is_empty() {
+                if !current_recipients.is_empty() {
+                    &current_recipients
+                } else {
+                    recipients
+                }
+            } else if !current_recipients.is_empty() {
                 &current_recipients
             } else {
                 recipients
-            }
-        } else if !current_recipients.is_empty() {
-            &current_recipients
-        } else {
-            recipients
-        };
+            };
 
         // 4. Scan mount_dir recursively for changes (supports pasting subdirectories)
         let plain_files = collect_plain_files(mount_dir);

@@ -185,16 +185,13 @@ impl CliArgs {
         if let Some(cmd) = &self.command {
             match cmd {
                 Command::Init { path } => {
-                    let files = path
-                        .as_ref()
-                        .map(|p| vec![p.clone()])
-                        .unwrap_or_else(|| {
-                            if self.files.is_empty() {
-                                vec![PathBuf::from(".")]
-                            } else {
-                                self.files.clone()
-                            }
-                        });
+                    let files = path.as_ref().map(|p| vec![p.clone()]).unwrap_or_else(|| {
+                        if self.files.is_empty() {
+                            vec![PathBuf::from(".")]
+                        } else {
+                            self.files.clone()
+                        }
+                    });
                     (Mode::Init, files)
                 }
                 Command::Mount { vault_dir } => {

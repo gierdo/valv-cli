@@ -3,7 +3,7 @@ use std::io::{BufWriter, Cursor};
 use std::path::Path;
 use std::process::Command;
 
-use crate::crypto::{encrypt_stream_unified, EncryptionMethod, BUFFER_SIZE};
+use crate::crypto::{BUFFER_SIZE, EncryptionMethod, encrypt_stream_unified};
 
 // simplification: calls ffmpeg (primary) or imagemagick (fallback) to generate a 512x512
 // center-cropped JPEG thumbnail. Ceiling: requires system ffmpeg or convert; upgrade path:
@@ -77,14 +77,7 @@ pub fn generate_thumbnail(path: &Path) -> Option<Vec<u8>> {
     if let Ok(out) = Command::new("convert")
         .arg(path)
         .args([
-            "-resize",
-            "512x512^",
-            "-gravity",
-            "center",
-            "-extent",
-            "512x512",
-            "-quality",
-            "85",
+            "-resize", "512x512^", "-gravity", "center", "-extent", "512x512", "-quality", "85",
             "jpeg:-",
         ])
         .output()

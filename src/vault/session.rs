@@ -111,7 +111,10 @@ pub fn list_mounts() -> Vec<ActiveMount> {
                             watch_pid: session.watch_pid,
                             file_count,
                         };
-                        if !mounts.iter().any(|m: &ActiveMount| m.mount_dir == active.mount_dir) {
+                        if !mounts
+                            .iter()
+                            .any(|m: &ActiveMount| m.mount_dir == active.mount_dir)
+                        {
                             mounts.push(active);
                         }
                     } else {

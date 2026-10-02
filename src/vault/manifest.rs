@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ValvError;
 use crate::config::AgeVaultManifest;
-use crate::crypto::{encrypt_stream_unified, Credentials, EncryptionMethod, VaultFormat};
+use crate::crypto::{Credentials, EncryptionMethod, VaultFormat, encrypt_stream_unified};
 
 pub fn write_encrypted_manifest_bytes(
     plaintext: &[u8],
@@ -39,7 +39,8 @@ pub fn write_encrypted_manifest_bytes(
         Some(m) => m,
         None => {
             return Err(ValvError::Message(
-                "Cannot encrypt manifest: no recipients, password, or identity provided.".to_string(),
+                "Cannot encrypt manifest: no recipients, password, or identity provided."
+                    .to_string(),
                 1,
             ));
         }
@@ -120,8 +121,9 @@ pub fn create_encrypted_manifest(
     credentials: &Credentials,
     iterations: u32,
 ) -> Result<PathBuf, ValvError> {
-    let toml_str = toml::to_string_pretty(manifest)
-        .map_err(|e| ValvError::Message(format!("Failed to serialize manifest to TOML: {}", e), 1))?;
+    let toml_str = toml::to_string_pretty(manifest).map_err(|e| {
+        ValvError::Message(format!("Failed to serialize manifest to TOML: {}", e), 1)
+    })?;
     write_encrypted_manifest_bytes(
         toml_str.as_bytes(),
         ".age_vault.toml",

@@ -14,9 +14,9 @@ use valv::crypto::{
 use valv::vault::{
     collect_plain_files, collect_vault_files, create_encrypted_manifest,
     create_thumbnail_file_unified, generate_random_filename, get_mount_dir,
-    get_suffix_for_path_and_format, get_thumbnail_valv_name, is_thumbnail_valv_file,
-    is_valv_file, list_mounts, mount_vault_with_credentials,
-    run_sync_daemon_with_credentials, sanitize_filename, save_encrypted_manifest, unmount_vault,
+    get_suffix_for_path_and_format, get_thumbnail_valv_name, is_thumbnail_valv_file, is_valv_file,
+    list_mounts, mount_vault_with_credentials, run_sync_daemon_with_credentials, sanitize_filename,
+    save_encrypted_manifest, unmount_vault,
 };
 
 fn resolve_output_path(
@@ -70,19 +70,25 @@ fn run_encrypt(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<
 
     let manifest_in_dir = if files.len() == 1 && files[0].is_dir() {
         AgeVaultManifest::load_from_dir(&files[0]).ok().flatten()
-    } else if let Some(ref out) = cli.output && out.is_dir() {
+    } else if let Some(ref out) = cli.output
+        && out.is_dir()
+    {
         AgeVaultManifest::load_from_dir(out).ok().flatten()
     } else {
         None
     };
 
-    let (mut recipient_strs, recipient_file_paths) = if !cli.recipients.is_empty() || !cli.recipients_files.is_empty() {
-        (cli.recipients.clone(), cli.recipients_files.clone())
-    } else if let Some((ref manifest, _)) = manifest_in_dir {
-        manifest.resolve_recipients()
-    } else {
-        (config.resolve_recipients(&cli.recipients), config.resolve_recipients_files(&cli.recipients_files))
-    };
+    let (mut recipient_strs, recipient_file_paths) =
+        if !cli.recipients.is_empty() || !cli.recipients_files.is_empty() {
+            (cli.recipients.clone(), cli.recipients_files.clone())
+        } else if let Some((ref manifest, _)) = manifest_in_dir {
+            manifest.resolve_recipients()
+        } else {
+            (
+                config.resolve_recipients(&cli.recipients),
+                config.resolve_recipients_files(&cli.recipients_files),
+            )
+        };
 
     if recipient_strs.is_empty() && recipient_file_paths.is_empty() {
         let identity_paths = config.resolve_identities(&cli.identities);
@@ -200,12 +206,9 @@ fn run_encrypt(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<
             let out_file = File::create(&dest_path)?;
             let mut out_writer = BufWriter::with_capacity(BUFFER_SIZE, out_file);
 
-            if let Err(e) = encrypt_stream_unified(
-                &mut in_file,
-                &mut out_writer,
-                orig_filename,
-                &method,
-            ) {
+            if let Err(e) =
+                encrypt_stream_unified(&mut in_file, &mut out_writer, orig_filename, &method)
+            {
                 let _ = fs::remove_file(&dest_path);
                 return Err(ValvError::Message(
                     format!("Encryption failed for {}: {}", source_path.display(), e),
@@ -262,7 +265,11 @@ fn run_encrypt(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<
                 &creds,
                 iterations,
             );
-        } else if format == VaultFormat::Age && !recipient_strs.is_empty() && files.len() == 1 && files[0].is_dir() {
+        } else if format == VaultFormat::Age
+            && !recipient_strs.is_empty()
+            && files.len() == 1
+            && files[0].is_dir()
+        {
             let manifest = AgeVaultManifest {
                 recipients: recipient_strs.clone(),
                 recipients_files: recipient_file_paths.clone(),
@@ -298,13 +305,10 @@ fn run_decrypt(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<
     }
 
     let identity_paths = config.resolve_identities(&cli.identities);
-    let identities = load_identities(&identity_paths)
-        .map_err(|e| ValvError::Message(e.to_string(), 1))?;
+    let identities =
+        load_identities(&identity_paths).map_err(|e| ValvError::Message(e.to_string(), 1))?;
 
-    let mut password = if identities.is_empty()
-        || cli.password.is_some()
-        || cli.stdin_password
-    {
+    let mut password = if identities.is_empty() || cli.password.is_some() || cli.stdin_password {
         let pwd = read_password(cli)
             .map_err(|e| ValvError::Message(format!("Failed to read password: {}", e), 1))?
             .into_bytes();
@@ -524,11 +528,15 @@ fn run_init(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<(),
     }
 
     let identity_paths = config.resolve_identities(&cli.identities);
-    let (mut recipient_strs, recipient_file_paths) = if !cli.recipients.is_empty() || !cli.recipients_files.is_empty() {
-        (cli.recipients.clone(), cli.recipients_files.clone())
-    } else {
-        (config.resolve_recipients(&cli.recipients), config.resolve_recipients_files(&cli.recipients_files))
-    };
+    let (mut recipient_strs, recipient_file_paths) =
+        if !cli.recipients.is_empty() || !cli.recipients_files.is_empty() {
+            (cli.recipients.clone(), cli.recipients_files.clone())
+        } else {
+            (
+                config.resolve_recipients(&cli.recipients),
+                config.resolve_recipients_files(&cli.recipients_files),
+            )
+        };
 
     if recipient_strs.is_empty() && recipient_file_paths.is_empty() {
         for id_path in &identity_paths {
@@ -541,8 +549,8 @@ fn run_init(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<(),
         }
     }
 
-    let identities = load_identities(&identity_paths)
-        .map_err(|e| ValvError::Message(e.to_string(), 1))?;
+    let identities =
+        load_identities(&identity_paths).map_err(|e| ValvError::Message(e.to_string(), 1))?;
     let recipients = load_recipients(&recipient_strs, &recipient_file_paths)
         .map_err(|e| ValvError::Message(e.to_string(), 1))?;
 
@@ -600,13 +608,19 @@ fn run_init(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<(),
             "Initialized encrypted Age vault at: {} ({} recipient(s) configured in {})",
             vault_dir.display(),
             recipient_strs.len(),
-            manifest_path.file_name().unwrap_or_default().to_string_lossy()
+            manifest_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
         );
     } else {
         println!(
             "Initialized encrypted vault at: {} ({})",
             vault_dir.display(),
-            manifest_path.file_name().unwrap_or_default().to_string_lossy()
+            manifest_path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
         );
     }
 
@@ -623,13 +637,10 @@ fn run_mount(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<()
     }
 
     let identity_paths = config.resolve_identities(&cli.identities);
-    let identities = load_identities(&identity_paths)
-        .map_err(|e| ValvError::Message(e.to_string(), 1))?;
+    let identities =
+        load_identities(&identity_paths).map_err(|e| ValvError::Message(e.to_string(), 1))?;
 
-    let mut password = if identities.is_empty()
-        || cli.password.is_some()
-        || cli.stdin_password
-    {
+    let mut password = if identities.is_empty() || cli.password.is_some() || cli.stdin_password {
         let pwd = read_password(cli)
             .map_err(|e| ValvError::Message(format!("Failed to read password: {}", e), 1))?
             .into_bytes();
@@ -649,24 +660,29 @@ fn run_mount(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<()
         credentials.password = Some(pwd.clone());
     }
 
-    let vault_manifest = match AgeVaultManifest::load_from_dir_with_credentials(&vault_dir, &credentials) {
-        Ok(opt) => opt,
-        Err(err) => {
-            return Err(ValvError::Message(
-                format!("Cannot mount vault: failed to decrypt manifest: {}", err),
-                1,
-            ));
-        }
-    };
+    let vault_manifest =
+        match AgeVaultManifest::load_from_dir_with_credentials(&vault_dir, &credentials) {
+            Ok(opt) => opt,
+            Err(err) => {
+                return Err(ValvError::Message(
+                    format!("Cannot mount vault: failed to decrypt manifest: {}", err),
+                    1,
+                ));
+            }
+        };
     let has_manifest = vault_manifest.is_some();
 
-    let (mut recipient_strs, recipient_file_paths) = if !cli.recipients.is_empty() || !cli.recipients_files.is_empty() {
-        (cli.recipients.clone(), cli.recipients_files.clone())
-    } else if let Some((ref manifest, _, _)) = vault_manifest {
-        manifest.resolve_recipients()
-    } else {
-        (config.resolve_recipients(&cli.recipients), config.resolve_recipients_files(&cli.recipients_files))
-    };
+    let (mut recipient_strs, recipient_file_paths) =
+        if !cli.recipients.is_empty() || !cli.recipients_files.is_empty() {
+            (cli.recipients.clone(), cli.recipients_files.clone())
+        } else if let Some((ref manifest, _, _)) = vault_manifest {
+            manifest.resolve_recipients()
+        } else {
+            (
+                config.resolve_recipients(&cli.recipients),
+                config.resolve_recipients_files(&cli.recipients_files),
+            )
+        };
 
     if recipient_strs.is_empty() && recipient_file_paths.is_empty() {
         for id_path in &identity_paths {
@@ -821,17 +837,18 @@ fn run_sync_daemon(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Res
         }
     }
 
-    if recipient_strs.is_empty() && recipient_file_paths.is_empty() {
-        if let Some(mount_manifest) = AgeVaultManifest::find_in_dir(mount_dir)
-            && let Ok((manifest, _)) = AgeVaultManifest::load_from_file_with_credentials(&mount_manifest, &Credentials::new())
-        {
-            let (r_strs, _) = manifest.resolve_recipients();
-            recipient_strs = r_strs;
-        }
+    if recipient_strs.is_empty()
+        && recipient_file_paths.is_empty()
+        && let Some(mount_manifest) = AgeVaultManifest::find_in_dir(mount_dir)
+        && let Ok((manifest, _)) =
+            AgeVaultManifest::load_from_file_with_credentials(&mount_manifest, &Credentials::new())
+    {
+        let (r_strs, _) = manifest.resolve_recipients();
+        recipient_strs = r_strs;
     }
 
-    let identities = load_identities(&identity_paths)
-        .map_err(|e| ValvError::Message(e.to_string(), 1))?;
+    let identities =
+        load_identities(&identity_paths).map_err(|e| ValvError::Message(e.to_string(), 1))?;
     let recipients = load_recipients(&recipient_strs, &recipient_file_paths)
         .map_err(|e| ValvError::Message(e.to_string(), 1))?;
 
@@ -880,8 +897,7 @@ fn run_sync_daemon(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Res
 
 fn run() -> Result<(), ValvError> {
     let cli = CliArgs::parse();
-    let config = ValvConfig::load(cli.config.as_deref())
-        .map_err(|e| ValvError::Message(e, 1))?;
+    let config = ValvConfig::load(cli.config.as_deref()).map_err(|e| ValvError::Message(e, 1))?;
     let (mode, files) = cli.resolve_mode_and_files(is_valv_file);
 
     match mode {
@@ -983,7 +999,8 @@ mod tests {
         let cli_enc = CliArgs::try_parse_from(enc_args).unwrap();
         let (mode, files) = cli_enc.resolve_mode_and_files(is_valv_file);
         assert_eq!(mode, Mode::Encrypt);
-        run_encrypt(&cli_enc, &ValvConfig::default(), &files).expect("CLI encrypt with age pubkey should succeed");
+        run_encrypt(&cli_enc, &ValvConfig::default(), &files)
+            .expect("CLI encrypt with age pubkey should succeed");
 
         // Find created encrypted file
         let mut enc_files = Vec::new();
@@ -1012,7 +1029,8 @@ mod tests {
         let cli_dec = CliArgs::try_parse_from(dec_args).unwrap();
         let (mode_dec, files_dec) = cli_dec.resolve_mode_and_files(is_valv_file);
         assert_eq!(mode_dec, Mode::Decrypt);
-        run_decrypt(&cli_dec, &ValvConfig::default(), &files_dec).expect("CLI decrypt with age key should succeed");
+        run_decrypt(&cli_dec, &ValvConfig::default(), &files_dec)
+            .expect("CLI decrypt with age key should succeed");
 
         let decrypted_content = fs::read_to_string(dec_dir.join("cli_secret.txt")).unwrap();
         assert_eq!(decrypted_content, "secret text content");
@@ -1047,7 +1065,8 @@ mod tests {
         let cli_enc = CliArgs::try_parse_from(enc_args).unwrap();
         let (mode, files) = cli_enc.resolve_mode_and_files(is_valv_file);
         assert_eq!(mode, Mode::Encrypt);
-        run_encrypt(&cli_enc, &ValvConfig::default(), &files).expect("Encrypting directory should succeed");
+        run_encrypt(&cli_enc, &ValvConfig::default(), &files)
+            .expect("Encrypting directory should succeed");
 
         let vault_files = collect_vault_files(&vault_dir);
         assert_eq!(vault_files.len(), 2);
@@ -1065,7 +1084,8 @@ mod tests {
         let cli_dec = CliArgs::try_parse_from(dec_args).unwrap();
         let (mode_dec, files_dec) = cli_dec.resolve_mode_and_files(is_valv_file);
         assert_eq!(mode_dec, Mode::Decrypt);
-        run_decrypt(&cli_dec, &ValvConfig::default(), &files_dec).expect("Decrypting directory should succeed");
+        run_decrypt(&cli_dec, &ValvConfig::default(), &files_dec)
+            .expect("Decrypting directory should succeed");
 
         assert_eq!(
             fs::read_to_string(dec_dir.join("root.txt")).unwrap(),
@@ -1123,7 +1143,8 @@ mod tests {
         let cli_dec = CliArgs::try_parse_from(dec_args).unwrap();
         let (_mode_dec, files_dec) = cli_dec.resolve_mode_and_files(is_valv_file);
         // Decrypt should skip corrupt file gracefully and not fail overall
-        run_decrypt(&cli_dec, &ValvConfig::default(), &files_dec).expect("Directory decrypt with corrupt file should succeed for valid files");
+        run_decrypt(&cli_dec, &ValvConfig::default(), &files_dec)
+            .expect("Directory decrypt with corrupt file should succeed for valid files");
 
         assert_eq!(
             fs::read_to_string(dec_dir.join("valid1.txt")).unwrap(),
@@ -1172,7 +1193,8 @@ mod tests {
         ];
         let cli_enc = CliArgs::try_parse_from(enc_args).unwrap();
         let (_mode_enc, files_enc) = cli_enc.resolve_mode_and_files(is_valv_file);
-        run_encrypt(&cli_enc, &config, &files_enc).expect("Encrypt with configured recipient should succeed");
+        run_encrypt(&cli_enc, &config, &files_enc)
+            .expect("Encrypt with configured recipient should succeed");
 
         let mut enc_files = Vec::new();
         for entry in fs::read_dir(&temp_dir).unwrap().flatten() {
@@ -1195,7 +1217,8 @@ mod tests {
         ];
         let cli_dec = CliArgs::try_parse_from(dec_args).unwrap();
         let (_mode_dec, files_dec) = cli_dec.resolve_mode_and_files(is_valv_file);
-        run_decrypt(&cli_dec, &config, &files_dec).expect("Decrypt with configured identity should succeed");
+        run_decrypt(&cli_dec, &config, &files_dec)
+            .expect("Decrypt with configured identity should succeed");
 
         assert_eq!(
             fs::read_to_string(dec_dir.join("doc.txt")).unwrap(),
@@ -1214,13 +1237,7 @@ mod tests {
         let key = age::x25519::Identity::generate();
         let pubkey = key.to_public().to_string();
 
-        let init_args = vec![
-            "valv",
-            "init",
-            "-r",
-            &pubkey,
-            vault_dir.to_str().unwrap(),
-        ];
+        let init_args = vec!["valv", "init", "-r", &pubkey, vault_dir.to_str().unwrap()];
         let cli_init = CliArgs::try_parse_from(init_args).unwrap();
         let (_mode_init, files_init) = cli_init.resolve_mode_and_files(is_valv_file);
         run_init(&cli_init, &ValvConfig::default(), &files_init).expect("run_init should succeed");
@@ -1229,13 +1246,7 @@ mod tests {
         assert!(!vault_dir.join(".age_vault.toml").exists());
 
         // Test that second init fails without -f
-        let init_dup_args = vec![
-            "valv",
-            "init",
-            "-r",
-            &pubkey,
-            vault_dir.to_str().unwrap(),
-        ];
+        let init_dup_args = vec!["valv", "init", "-r", &pubkey, vault_dir.to_str().unwrap()];
         let cli_init_dup = CliArgs::try_parse_from(init_dup_args).unwrap();
         let (_mode_dup, files_dup) = cli_init_dup.resolve_mode_and_files(is_valv_file);
         assert!(run_init(&cli_init_dup, &ValvConfig::default(), &files_dup).is_err());
@@ -1263,7 +1274,8 @@ mod tests {
         ];
         let cli_enc = CliArgs::try_parse_from(enc_args).unwrap();
         let (_mode_enc, files_enc) = cli_enc.resolve_mode_and_files(is_valv_file);
-        run_encrypt(&cli_enc, &ValvConfig::default(), &files_enc).expect("run_encrypt should succeed");
+        run_encrypt(&cli_enc, &ValvConfig::default(), &files_enc)
+            .expect("run_encrypt should succeed");
 
         assert!(source_dir.join(".age_vault.toml.age").exists());
 

@@ -1,7 +1,7 @@
+use crate::crypto::VaultFormat;
+use rand::RngExt;
 use std::fs;
 use std::path::{Path, PathBuf};
-use rand::RngExt;
-use crate::crypto::VaultFormat;
 
 pub fn get_suffix_for_path(path: &Path) -> &'static str {
     get_suffix_for_path_and_format(path, VaultFormat::Valv)

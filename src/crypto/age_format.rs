@@ -89,8 +89,10 @@ pub fn load_recipients(
     recipients: &[String],
     files: &[PathBuf],
 ) -> io::Result<Vec<Box<dyn age::Recipient + Send>>> {
-    let recipient_files: Vec<String> =
-        files.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    let recipient_files: Vec<String> = files
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
     let mut stdin_guard = age::cli_common::StdinGuard::new(false);
     age::cli_common::read_recipients(
         recipients.to_vec(),
@@ -113,7 +115,10 @@ pub fn extract_recipients_from_identity_file(path: &std::path::Path) -> Vec<Stri
 
     let expanded_path = crate::config::expand_tilde(path);
     let mut files_to_check = vec![expanded_path.clone()];
-    let file_name = expanded_path.file_name().unwrap_or_default().to_string_lossy();
+    let file_name = expanded_path
+        .file_name()
+        .unwrap_or_default()
+        .to_string_lossy();
     if !file_name.ends_with(".pub") {
         let mut pub_file = expanded_path.clone();
         pub_file.set_file_name(format!("{}.pub", file_name));

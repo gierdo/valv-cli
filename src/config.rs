@@ -1,6 +1,6 @@
+use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
-use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Deserialize, Serialize, Default, Clone, PartialEq, Eq)]
 pub struct AgeVaultManifest {
@@ -253,7 +253,12 @@ impl ValvConfig {
             return Some(PathBuf::from(xdg_cfg).join("valv").join("config.toml"));
         }
         if let Some(home) = std::env::var_os("HOME") {
-            return Some(PathBuf::from(home).join(".config").join("valv").join("config.toml"));
+            return Some(
+                PathBuf::from(home)
+                    .join(".config")
+                    .join("valv")
+                    .join("config.toml"),
+            );
         }
         None
     }
@@ -313,10 +318,10 @@ impl ValvConfig {
             return cli_recipients.to_vec();
         }
         let mut recips = Vec::new();
-        if let Some(ref r) = self.age.recipient {
-            if !recips.contains(r) {
-                recips.push(r.clone());
-            }
+        if let Some(ref r) = self.age.recipient
+            && !recips.contains(r)
+        {
+            recips.push(r.clone());
         }
         for r in &self.age.recipients {
             if !recips.contains(r) {
@@ -328,7 +333,10 @@ impl ValvConfig {
 
     pub fn resolve_recipients_files(&self, cli_recipients_files: &[PathBuf]) -> Vec<PathBuf> {
         if !cli_recipients_files.is_empty() {
-            return cli_recipients_files.iter().map(|p| expand_tilde(p)).collect();
+            return cli_recipients_files
+                .iter()
+                .map(|p| expand_tilde(p))
+                .collect();
         }
         let mut files = Vec::new();
         if let Some(ref f) = self.age.recipients_file {
@@ -355,11 +363,22 @@ pub fn sops_default_identity_paths() -> Vec<PathBuf> {
     }
 
     if let Some(xdg_cfg) = std::env::var_os("XDG_CONFIG_HOME") {
-        paths.push(PathBuf::from(xdg_cfg).join("sops").join("age").join("keys.txt"));
+        paths.push(
+            PathBuf::from(xdg_cfg)
+                .join("sops")
+                .join("age")
+                .join("keys.txt"),
+        );
     }
 
     if let Some(home) = std::env::var_os("HOME") {
-        paths.push(PathBuf::from(&home).join(".config").join("sops").join("age").join("keys.txt"));
+        paths.push(
+            PathBuf::from(&home)
+                .join(".config")
+                .join("sops")
+                .join("age")
+                .join("keys.txt"),
+        );
         #[cfg(target_os = "macos")]
         {
             paths.push(
@@ -376,7 +395,12 @@ pub fn sops_default_identity_paths() -> Vec<PathBuf> {
     #[cfg(windows)]
     {
         if let Some(appdata) = std::env::var_os("APPDATA") {
-            paths.push(PathBuf::from(appdata).join("sops").join("age").join("keys.txt"));
+            paths.push(
+                PathBuf::from(appdata)
+                    .join("sops")
+                    .join("age")
+                    .join("keys.txt"),
+            );
         }
     }
 
@@ -411,7 +435,8 @@ mod tests {
 
     #[test]
     fn test_sops_identity_fallback() {
-        let temp_dir = std::env::temp_dir().join(format!("valv_sops_test_{}", rand::random::<u32>()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("valv_sops_test_{}", rand::random::<u32>()));
         fs::create_dir_all(&temp_dir).unwrap();
 
         let sops_key = temp_dir.join("keys.txt");
@@ -480,7 +505,8 @@ recipients_files = ["~/.config/age/recipients.txt"]
 
     #[test]
     fn test_age_vault_manifest_discovery() {
-        let temp_dir = std::env::temp_dir().join(format!("valv_manifest_test_{}", rand::random::<u32>()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("valv_manifest_test_{}", rand::random::<u32>()));
         fs::create_dir_all(&temp_dir).unwrap();
 
         assert_eq!(AgeVaultManifest::find_in_dir(&temp_dir), None);
@@ -514,7 +540,8 @@ recipients_files = ["~/.config/age/recipients.txt"]
     #[test]
     fn test_age_vault_manifest_resolve_recipients_identities() {
         use age::secrecy::ExposeSecret;
-        let temp_dir = std::env::temp_dir().join(format!("valv_manifest_id_test_{}", rand::random::<u32>()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("valv_manifest_id_test_{}", rand::random::<u32>()));
         fs::create_dir_all(&temp_dir).unwrap();
 
         let key1 = age::x25519::Identity::generate();
@@ -523,7 +550,15 @@ recipients_files = ["~/.config/age/recipients.txt"]
         let pubkey2 = key2.to_public().to_string();
 
         let key_file = temp_dir.join("key2.txt");
-        fs::write(&key_file, format!("# public key: {}\n{}\n", pubkey2, key2.to_string().expose_secret())).unwrap();
+        fs::write(
+            &key_file,
+            format!(
+                "# public key: {}\n{}\n",
+                pubkey2,
+                key2.to_string().expose_secret()
+            ),
+        )
+        .unwrap();
 
         let toml_str = format!(
             "identity = \"{}\"\nidentities = [\"{}\"]\nrecipient = \"{}\"\n",

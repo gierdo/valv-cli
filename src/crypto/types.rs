@@ -1,5 +1,5 @@
-use std::io::{self, Read, Write};
 use serde::{Deserialize, Serialize};
+use std::io::{self, Read, Write};
 use zeroize::Zeroize;
 
 pub const VALV_V2: u32 = 2;
@@ -117,10 +117,7 @@ impl Drop for Credentials {
 pub enum EncryptionMethod<'a> {
     AgeRecipients(&'a [Box<dyn age::Recipient + Send>]),
     AgePassphrase(&'a str),
-    ValvPassphrase {
-        password: &'a [u8],
-        iterations: u32,
-    },
+    ValvPassphrase { password: &'a [u8], iterations: u32 },
 }
 
 pub fn write_metadata_prefix<W: Write>(writer: &mut W, original_name: &str) -> io::Result<()> {

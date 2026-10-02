@@ -2,16 +2,16 @@ use std::fs::File;
 use std::io::{self, BufReader, Read, Write};
 use std::path::Path;
 
-use chacha20::cipher::{KeyIvInit, StreamCipher};
 use chacha20::ChaCha20;
+use chacha20::cipher::{KeyIvInit, StreamCipher};
 use pbkdf2::pbkdf2_hmac;
 use rand::RngExt;
 use sha2::Sha512;
 use subtle::ConstantTimeEq;
 
 use super::types::{
-    zeroize, DecryptError, DecryptedHeader, BUFFER_SIZE, CHECK_LEN, IV_LEN, MAX_ITERATIONS,
-    MIN_ITERATIONS, SALT_LEN, VALV_V2,
+    BUFFER_SIZE, CHECK_LEN, DecryptError, DecryptedHeader, IV_LEN, MAX_ITERATIONS, MIN_ITERATIONS,
+    SALT_LEN, VALV_V2, zeroize,
 };
 
 pub fn derive_key(password: &[u8], salt: &[u8], iterations: u32) -> [u8; 32] {

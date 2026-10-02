@@ -6,22 +6,28 @@ pub mod session;
 pub mod sync;
 pub mod thumbnail;
 
-pub use manifest::{create_encrypted_manifest, save_encrypted_manifest, write_encrypted_manifest_bytes};
+pub use manifest::{
+    create_encrypted_manifest, save_encrypted_manifest, write_encrypted_manifest_bytes,
+};
 pub use mount::{mount_vault, mount_vault_with_credentials};
 pub use paths::{
     clean_empty_dirs_up_to, collect_plain_files, collect_vault_files, generate_random_filename,
     get_suffix_for_path, get_suffix_for_path_and_format, get_thumbnail_valv_name,
     is_thumbnail_valv_file, is_valv_file, sanitize_filename,
 };
-pub use session::{get_mount_dir, is_process_alive, list_mounts, ActiveMount, SessionFileEntry, ValvSession};
-pub use sync::{preserve_unsynced_dirs, run_sync_daemon_with_credentials, sync_file_to_vault, unmount_vault};
+pub use session::{
+    ActiveMount, SessionFileEntry, ValvSession, get_mount_dir, is_process_alive, list_mounts,
+};
+pub use sync::{
+    preserve_unsynced_dirs, run_sync_daemon_with_credentials, sync_file_to_vault, unmount_vault,
+};
 pub use thumbnail::{create_thumbnail_file_unified, generate_thumbnail};
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::crypto::{
-        encrypt_stream, encrypt_stream_unified, Credentials, EncryptionMethod, VaultFormat,
+        Credentials, EncryptionMethod, VaultFormat, encrypt_stream, encrypt_stream_unified,
     };
     use rand::RngExt;
     use std::fs::{self, File};
@@ -446,7 +452,10 @@ mod tests {
 
     #[test]
     fn test_age_vault_manifest_lifecycle_and_reencryption() {
-        let temp_dir = std::env::temp_dir().join(format!("valv_manifest_reenc_{}", rand::rng().random::<u32>()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "valv_manifest_reenc_{}",
+            rand::rng().random::<u32>()
+        ));
         let vault_dir = temp_dir.join("vault");
         let mount_dir = temp_dir.join("mount");
         fs::create_dir_all(&vault_dir).unwrap();
@@ -474,7 +483,10 @@ mod tests {
 
         let creds2 = Credentials::new().with_identities(vec![Box::new(key2.clone())]);
         let mut check_fail = Vec::new();
-        assert!(crate::crypto::decrypt_file_with_credentials_to(&file_path, &creds2, &mut check_fail).is_err());
+        assert!(
+            crate::crypto::decrypt_file_with_credentials_to(&file_path, &creds2, &mut check_fail)
+                .is_err()
+        );
 
         let v_dir = vault_dir.clone();
         let m_dir = mount_dir.clone();
@@ -514,20 +526,28 @@ mod tests {
         thread::sleep(Duration::from_millis(1500));
 
         unmount_vault(&mount_dir).expect("Unmount should succeed");
-        daemon_handle.join().expect("Daemon thread joined").expect("Daemon run succeeded");
+        daemon_handle
+            .join()
+            .expect("Daemon thread joined")
+            .expect("Daemon run succeeded");
 
         assert!(vault_dir.join(".age_vault.toml.age").exists());
         assert!(!vault_dir.join(".age_vault.toml").exists());
 
         let mut check_success = Vec::new();
-        let orig_name = crate::crypto::decrypt_file_with_credentials_to(&file_path, &creds2, &mut check_success)
-            .expect("Decryption by newly added recipient should now succeed after re-encryption");
+        let orig_name = crate::crypto::decrypt_file_with_credentials_to(
+            &file_path,
+            &creds2,
+            &mut check_success,
+        )
+        .expect("Decryption by newly added recipient should now succeed after re-encryption");
         assert_eq!(orig_name, "secret.txt");
         assert_eq!(check_success, b"Initial Secret Document");
 
-        let (decrypted_manifest, _, _) = crate::config::AgeVaultManifest::load_from_dir_with_credentials(&vault_dir, &creds2)
-            .unwrap()
-            .expect("Manifest should decrypt with key2");
+        let (decrypted_manifest, _, _) =
+            crate::config::AgeVaultManifest::load_from_dir_with_credentials(&vault_dir, &creds2)
+                .unwrap()
+                .expect("Manifest should decrypt with key2");
         assert_eq!(decrypted_manifest.recipients.len(), 2);
 
         let _ = fs::remove_dir_all(&temp_dir);
@@ -536,7 +556,10 @@ mod tests {
     #[test]
     fn test_age_vault_manifest_identity_reencryption() {
         use age::secrecy::ExposeSecret;
-        let temp_dir = std::env::temp_dir().join(format!("valv_manifest_id_reenc_{}", rand::rng().random::<u32>()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "valv_manifest_id_reenc_{}",
+            rand::rng().random::<u32>()
+        ));
         let vault_dir = temp_dir.join("vault");
         let mount_dir = temp_dir.join("mount");
         fs::create_dir_all(&vault_dir).unwrap();
@@ -548,7 +571,15 @@ mod tests {
         let pubkey2 = key2.to_public();
 
         let key2_file = temp_dir.join("key2.txt");
-        fs::write(&key2_file, format!("# public key: {}\n{}\n", pubkey2, key2.to_string().expose_secret())).unwrap();
+        fs::write(
+            &key2_file,
+            format!(
+                "# public key: {}\n{}\n",
+                pubkey2,
+                key2.to_string().expose_secret()
+            ),
+        )
+        .unwrap();
 
         let manifest_content = format!("recipients = [\"{}\"]\n", pubkey1);
         fs::write(vault_dir.join(".age_vault.toml"), manifest_content).unwrap();
@@ -567,7 +598,10 @@ mod tests {
 
         let creds2 = Credentials::new().with_identities(vec![Box::new(key2.clone())]);
         let mut check_fail = Vec::new();
-        assert!(crate::crypto::decrypt_file_with_credentials_to(&file_path, &creds2, &mut check_fail).is_err());
+        assert!(
+            crate::crypto::decrypt_file_with_credentials_to(&file_path, &creds2, &mut check_fail)
+                .is_err()
+        );
 
         let v_dir = vault_dir.clone();
         let m_dir = mount_dir.clone();
@@ -612,20 +646,28 @@ mod tests {
         thread::sleep(Duration::from_millis(1500));
 
         unmount_vault(&mount_dir).expect("Unmount should succeed");
-        daemon_handle.join().expect("Daemon thread joined").expect("Daemon run succeeded");
+        daemon_handle
+            .join()
+            .expect("Daemon thread joined")
+            .expect("Daemon run succeeded");
 
         assert!(vault_dir.join(".age_vault.toml.age").exists());
         assert!(!vault_dir.join(".age_vault.toml").exists());
 
         let mut check_success = Vec::new();
-        let orig_name = crate::crypto::decrypt_file_with_credentials_to(&file_path, &creds2, &mut check_success)
-            .expect("Decryption by newly added identity should succeed after re-encryption");
+        let orig_name = crate::crypto::decrypt_file_with_credentials_to(
+            &file_path,
+            &creds2,
+            &mut check_success,
+        )
+        .expect("Decryption by newly added identity should succeed after re-encryption");
         assert_eq!(orig_name, "secret.txt");
         assert_eq!(check_success, b"Top Secret With Identity");
 
-        let (decrypted_manifest, _, decrypted_content) = crate::config::AgeVaultManifest::load_from_dir_with_credentials(&vault_dir, &creds2)
-            .unwrap()
-            .expect("Manifest should decrypt with key2");
+        let (decrypted_manifest, _, decrypted_content) =
+            crate::config::AgeVaultManifest::load_from_dir_with_credentials(&vault_dir, &creds2)
+                .unwrap()
+                .expect("Manifest should decrypt with key2");
         let (resolved, _) = decrypted_manifest.resolve_recipients();
         assert_eq!(resolved.len(), 2);
         assert!(decrypted_content.contains("key2.txt"));
@@ -658,19 +700,28 @@ mod tests {
         }
 
         let remount_manifest_text = fs::read_to_string(mount_dir.join(".age_vault.toml")).unwrap();
-        assert!(remount_manifest_text.contains("key2.txt"), "Decrypted manifest should keep added key2 identity");
+        assert!(
+            remount_manifest_text.contains("key2.txt"),
+            "Decrypted manifest should keep added key2 identity"
+        );
         let remount_secret = fs::read_to_string(mount_dir.join("secret.txt")).unwrap();
         assert_eq!(remount_secret, "Top Secret With Identity");
 
         unmount_vault(&mount_dir).expect("Unmount should succeed");
-        daemon_handle2.join().expect("Daemon 2 joined").expect("Daemon 2 succeeded");
+        daemon_handle2
+            .join()
+            .expect("Daemon 2 joined")
+            .expect("Daemon 2 succeeded");
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_mount_fails_when_encrypted_manifest_cannot_be_decrypted() {
-        let temp_dir = std::env::temp_dir().join(format!("valv_manifest_fail_{}", rand::rng().random::<u32>()));
+        let temp_dir = std::env::temp_dir().join(format!(
+            "valv_manifest_fail_{}",
+            rand::rng().random::<u32>()
+        ));
         let vault_dir = temp_dir.join("vault");
         let mount_dir = temp_dir.join("mount");
         fs::create_dir_all(&vault_dir).unwrap();
@@ -686,8 +737,15 @@ mod tests {
 
         let recips = vec![Box::new(pubkey_owner) as Box<dyn age::Recipient + Send>];
         let creds_empty = Credentials::new();
-        save_encrypted_manifest(&plain_manifest, &vault_dir, VaultFormat::Age, &recips, &creds_empty, 1000)
-            .expect("Save encrypted manifest should succeed");
+        save_encrypted_manifest(
+            &plain_manifest,
+            &vault_dir,
+            VaultFormat::Age,
+            &recips,
+            &creds_empty,
+            1000,
+        )
+        .expect("Save encrypted manifest should succeed");
 
         assert!(vault_dir.join(".age_vault.toml.age").exists());
         assert!(!vault_dir.join(".age_vault.toml").exists());
@@ -706,8 +764,14 @@ mod tests {
             &[],
         );
 
-        assert!(mount_res.is_err(), "Mount must fail when manifest cannot be decrypted");
-        assert!(!mount_dir.exists(), "Mount directory should not exist on failed mount");
+        assert!(
+            mount_res.is_err(),
+            "Mount must fail when manifest cannot be decrypted"
+        );
+        assert!(
+            !mount_dir.exists(),
+            "Mount directory should not exist on failed mount"
+        );
 
         let m_dir = mount_dir.clone();
         let v_dir = vault_dir.clone();
@@ -734,16 +798,23 @@ mod tests {
             thread::sleep(Duration::from_millis(50));
         }
 
-        assert!(mount_dir.join(".age_vault.toml").exists(), "Decrypted manifest should be visible in mount_dir");
+        assert!(
+            mount_dir.join(".age_vault.toml").exists(),
+            "Decrypted manifest should be visible in mount_dir"
+        );
         unmount_vault(&mount_dir).expect("Unmount should succeed");
-        daemon_handle.join().expect("Daemon thread joined").expect("Daemon run succeeded");
+        daemon_handle
+            .join()
+            .expect("Daemon thread joined")
+            .expect("Daemon run succeeded");
 
         let _ = fs::remove_dir_all(&temp_dir);
     }
 
     #[test]
     fn test_create_encrypted_manifest_and_mount() {
-        let temp_dir = std::env::temp_dir().join(format!("valv_init_test_{}", rand::rng().random::<u32>()));
+        let temp_dir =
+            std::env::temp_dir().join(format!("valv_init_test_{}", rand::rng().random::<u32>()));
         let vault_dir = temp_dir.join("vault");
         let mount_dir = temp_dir.join("mount");
         fs::create_dir_all(&vault_dir).unwrap();
@@ -759,8 +830,15 @@ mod tests {
         let recips = vec![Box::new(pubkey.clone()) as Box<dyn age::Recipient + Send>];
         let creds = Credentials::new();
 
-        let created_path = create_encrypted_manifest(&vault_dir, &manifest, VaultFormat::Age, &recips, &creds, 1000)
-            .expect("create_encrypted_manifest should succeed");
+        let created_path = create_encrypted_manifest(
+            &vault_dir,
+            &manifest,
+            VaultFormat::Age,
+            &recips,
+            &creds,
+            1000,
+        )
+        .expect("create_encrypted_manifest should succeed");
 
         assert_eq!(created_path, vault_dir.join(".age_vault.toml.age"));
         assert!(created_path.exists());
@@ -768,8 +846,11 @@ mod tests {
 
         // Verify that it loads and decrypts with key
         let creds_with_key = Credentials::new().with_identities(vec![Box::new(key.clone())]);
-        let loaded = crate::config::AgeVaultManifest::load_from_dir_with_credentials(&vault_dir, &creds_with_key)
-            .expect("Should load from dir with credentials");
+        let loaded = crate::config::AgeVaultManifest::load_from_dir_with_credentials(
+            &vault_dir,
+            &creds_with_key,
+        )
+        .expect("Should load from dir with credentials");
         assert!(loaded.is_some());
         let (loaded_manifest, _, _) = loaded.unwrap();
         assert_eq!(loaded_manifest.recipients, vec![pubkey.to_string()]);
@@ -803,7 +884,10 @@ mod tests {
 
         assert!(mount_dir.join(".age_vault.toml").exists());
         unmount_vault(&mount_dir).expect("Unmount should succeed");
-        daemon_handle.join().expect("Daemon thread joined").expect("Daemon succeeded");
+        daemon_handle
+            .join()
+            .expect("Daemon thread joined")
+            .expect("Daemon succeeded");
 
         let _ = fs::remove_dir_all(&temp_dir);
     }

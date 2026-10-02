@@ -6,14 +6,12 @@ use std::time::UNIX_EPOCH;
 
 use crate::ValvError;
 use crate::crypto::{
-    decrypt_header_with_credentials, Credentials, DecryptError, EncryptionMethod, VaultFormat,
-    BUFFER_SIZE,
+    BUFFER_SIZE, Credentials, DecryptError, EncryptionMethod, VaultFormat,
+    decrypt_header_with_credentials,
 };
 
 use super::manifest::save_encrypted_manifest;
-use super::paths::{
-    collect_vault_files, get_thumbnail_valv_name, sanitize_filename,
-};
+use super::paths::{collect_vault_files, get_thumbnail_valv_name, sanitize_filename};
 use super::session::{SessionFileEntry, ValvSession};
 use super::sync::run_sync_daemon_with_credentials;
 use super::thumbnail::create_thumbnail_file_unified;
@@ -62,17 +60,14 @@ pub fn mount_vault_with_credentials(
     }
 
     // 1. Decrypt manifest first if present. Abort immediately if manifest cannot be decrypted.
-    let manifest_info = if let Some(manifest_path) = crate::config::AgeVaultManifest::find_in_dir(vault_dir) {
+    let manifest_info = if let Some(manifest_path) =
+        crate::config::AgeVaultManifest::find_in_dir(vault_dir)
+    {
         let (manifest, content) = crate::config::AgeVaultManifest::load_from_file_with_credentials(
             &manifest_path,
             credentials,
         )
-        .map_err(|e| {
-            ValvError::Message(
-                format!("Failed to decrypt vault manifest: {}", e),
-                1,
-            )
-        })?;
+        .map_err(|e| ValvError::Message(format!("Failed to decrypt vault manifest: {}", e), 1))?;
         Some((manifest, manifest_path, content))
     } else {
         None
@@ -84,7 +79,8 @@ pub fn mount_vault_with_credentials(
     if let Some(first_file) = valv_files.first() {
         let f = File::open(first_file)?;
         let r = BufReader::new(f);
-        if let Err(DecryptError::InvalidPassword) = decrypt_header_with_credentials(r, credentials) {
+        if let Err(DecryptError::InvalidPassword) = decrypt_header_with_credentials(r, credentials)
+        {
             return Err(ValvError::InvalidPassword);
         }
     }
@@ -137,7 +133,8 @@ pub fn mount_vault_with_credentials(
         let fallback_recips;
         let recips_for_init = if !recipients.is_empty() {
             recipients
-        } else if let Ok(loaded) = crate::crypto::load_recipients(&manifest_recip_list, &resolved_manifest_files)
+        } else if let Ok(loaded) =
+            crate::crypto::load_recipients(&manifest_recip_list, &resolved_manifest_files)
             && !loaded.is_empty()
         {
             fallback_recips = loaded;
