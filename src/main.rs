@@ -99,7 +99,9 @@ fn run_encrypt(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<
     let recipients = load_recipients(&recipient_strs, &recipient_file_paths)
         .map_err(|e| ValvError::Message(e.to_string(), 1))?;
 
-    let format = if !recipients.is_empty() || cli.age || manifest_in_dir.is_some() {
+    let format = if cli.valv {
+        VaultFormat::Valv
+    } else if !recipients.is_empty() || cli.age || manifest_in_dir.is_some() {
         VaultFormat::Age
     } else {
         VaultFormat::Valv
@@ -696,7 +698,9 @@ fn run_mount(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Result<()
     };
     let mount_dir = get_mount_dir(&vault_dir, watch_pid, cli.output.as_deref());
     let iterations = cli.iterations.unwrap_or(DEFAULT_ITERATIONS);
-    let format = if cli.age || !recipients.is_empty() || has_manifest {
+    let format = if cli.valv {
+        VaultFormat::Valv
+    } else if cli.age || !recipients.is_empty() || has_manifest {
         VaultFormat::Age
     } else {
         VaultFormat::Valv
@@ -809,7 +813,9 @@ fn run_sync_daemon(cli: &CliArgs, config: &ValvConfig, files: &[PathBuf]) -> Res
     }
 
     let iterations = cli.iterations.unwrap_or(DEFAULT_ITERATIONS);
-    let format = if cli.age || !recipients.is_empty() {
+    let format = if cli.valv {
+        VaultFormat::Valv
+    } else if cli.age || !recipients.is_empty() {
         VaultFormat::Age
     } else {
         VaultFormat::Valv

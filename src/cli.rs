@@ -288,6 +288,16 @@ mod tests {
     }
 
     #[test]
+    fn test_mount_valv_flag() {
+        let args = vec!["valv", "mount", "my_vault", "--valv"];
+        let cli = CliArgs::try_parse_from(args).unwrap();
+        let (mode, files) = cli.resolve_mode_and_files(|_| false);
+        assert_eq!(mode, Mode::Mount);
+        assert!(cli.valv);
+        assert_eq!(files, vec![PathBuf::from("my_vault")]);
+    }
+
+    #[test]
     fn test_mounts_command() {
         let args = vec!["valv", "mounts"];
         let cli = CliArgs::try_parse_from(args).unwrap();

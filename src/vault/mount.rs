@@ -328,6 +328,8 @@ pub fn mount_vault_with_credentials(
 
         if default_format == VaultFormat::Age {
             cmd.arg("--age");
+        } else if default_format == VaultFormat::Valv {
+            cmd.arg("--valv");
         }
 
         for path in identity_paths {

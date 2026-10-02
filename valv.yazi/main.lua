@@ -185,7 +185,7 @@ local function mount_vault(vault_dir)
 		return false
 	end
 
-	output = run_valv({ "mount", vault_dir }, password, false)
+	output = run_valv({ "mount", vault_dir, "--valv" }, password, false)
 	if output and output.status.success then
 		local mount_path = output.stdout:match("READY%s+([^\r\n]+)")
 		if mount_path then
